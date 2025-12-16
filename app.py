@@ -28,25 +28,35 @@ def get_nearest_date(target_date, available_dates):
     diff_days = (nearest_date - target_date).days
     return nearest_date, diff_days
 
-def get_delivery_date(year, month):
-    """计算股指期货交割日：每月的第3个周五"""
+def get_special_dates(year, month):
+    """
+    获取当月特殊的两个交割日：
+    1. 股指期货交割日：第3个周五
+    2. ETF期权交割日：第4个周三
+    """
+    special_days = []
     c = calendar.monthcalendar(year, month)
-    # calendar 矩阵中，周五是索引 4
-    # 提取该月所有的周五（过滤掉为0的占位符）
-    fridays = [week[4] for week in c if week[4] != 0]
     
-    # 取第3个周五 (索引为2)
+    # --- 1. 计算第3个周五 (索引4) ---
+    fridays = [week[4] for week in c if week[4] != 0]
     if len(fridays) >= 3:
-        day = fridays[2]
-        return datetime.datetime(year, month, day)
-    return None
+        special_days.append({
+            "type": "期货交割日(第3周五)",
+            "date": datetime.datetime(year, month, fridays[2])
+        })
+        
+    # --- 2. 计算第4个周三 (索引2) ---
+    wednesdays = [week[2] for week in c if week[2] != 0]
+    if len(wednesdays) >= 4:
+        special_days.append({
+            "type": "期权交割日(第4周三)",
+            "date": datetime.datetime(year, month, wednesdays[3])
+        })
+        
+    return special_days
 
 def generate_target_dates(year, mode):
-    """
-    根据模式生成目标日期列表
-    mode A: 月中(15日) + 月末
-    mode B: 股指期货交割日 (第3个周五)
-    """
+    """根据模式生成目标日期列表"""
     targets = []
     today = datetime.datetime.now()
     
@@ -64,47 +74,38 @@ def generate_target_dates(year, mode):
             if end_date <= today:
                 targets.append({"type": "月底", "date": end_date})
 
-        # --- 模式 B: 交割日 (每月第3个周五) ---
+        # --- 模式 B: 期货交割日 + 期权交割日 ---
         elif mode == "B":
-            delivery_date = get_delivery_date(year, month)
-            if delivery_date and delivery_date <= today:
-                targets.append({"type": "期货交割日", "date": delivery_date})
-            
-            # 如果你定义的"这两个交割日"是指 "期货交割日(第3个周五)" 和 "期权交割日(第4个周三)"
-            # 可以把下面这段代码的注释解开：
-            
-            # c = calendar.monthcalendar(year, month)
-            # wednesdays = [week[2] for week in c if week[2] != 0]
-            # if len(wednesdays) >= 4:
-            #     option_date = datetime.datetime(year, month, wednesdays[3])
-            #     if option_date <= today:
-            #          targets.append({"type": "期权交割日", "date": option_date})
+            special_days = get_special_dates(year, month)
+            for day_info in special_days:
+                if day_info['date'] <= today:
+                    targets.append(day_info)
 
+    # 按日期排序，防止错乱
+    targets.sort(key=lambda x: x['date'])
     return targets
 
 # --- 页面 UI ---
 
-# 1. 标题改小 (使用 Markdown H3)
-st.markdown("### A股特定日期收盘价查询")
+st.markdown("### 📉 A股特定日期收盘价查询")
 
 col_input, col_result = st.columns([1, 3], gap="large")
 
 with col_input:
     with st.container(border=True):
-        st.caption("查询设置") # 使用 caption 字体更小
+        st.caption("查询设置")
         
         stock_code = st.text_input("股票代码", value="600519")
         
         current_year = datetime.datetime.now().year
         year = st.number_input("年份", min_value=2000, max_value=current_year, value=current_year)
         
-        # 2. 增加模式选择
+        # 模式选择
         mode_select = st.radio(
             "选择日期模式",
-            ("A: 月中(15日) & 月底", "B: 股指期货交割日"),
+            ("A: 月中(15日) & 月底", "B: 期货(第3周五) & 期权(第4周三)"),
             index=0
         )
-        # 提取模式代码 A 或 B
         mode = "A" if "A:" in mode_select else "B"
 
         run_btn = st.button("开始查询", type="primary", use_container_width=True)
@@ -120,7 +121,6 @@ with col_result:
             if df_hist is not None and not df_hist.empty:
                 trading_dates = df_hist['日期']
                 
-                # 传入 mode 参数
                 target_list = generate_target_dates(year, mode)
                 
                 result_data = []
@@ -130,7 +130,6 @@ with col_result:
                     
                     actual_date, diff = get_nearest_date(t_date, trading_dates)
                     
-                    # 查找价格
                     price_rows = df_hist.loc[df_hist['日期'] == actual_date, '收盘']
                     if not price_rows.empty:
                         price = price_rows.values[0]
@@ -150,7 +149,7 @@ with col_result:
                 
                 if result_data:
                     res_df = pd.DataFrame(result_data)
-                    st.success(f"查询完成：{stock_code}")
+                    st.success(f"查询完成：{stock_code} ({year}年 模式{mode})")
                     st.dataframe(res_df, use_container_width=True)
                     
                     csv = res_df.to_csv(index=False).encode('utf-8-sig')
@@ -164,6 +163,6 @@ with col_result:
                 else:
                     st.info("所选年份尚未到达该日期节点。")
             else:
-                st.warning("未找到数据，请检查代码。")
+                st.warning("未找到数据，请检查股票代码。")
     elif not run_btn:
         st.info("👈 请在左侧选择模式并查询")
