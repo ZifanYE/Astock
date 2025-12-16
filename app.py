@@ -87,7 +87,7 @@ def generate_target_dates(year, mode):
 
 # --- 页面 UI ---
 
-st.markdown("### 📉 A股特定日期收盘价查询")
+st.markdown("### A股特定日期收盘价查询")
 
 col_input, col_result = st.columns([1, 3], gap="large")
 
