@@ -3,7 +3,7 @@ import akshare as ak
 import pandas as pd
 import datetime
 import calendar
-
+import os # 用于检查文件是否存在
 # 1. 页面配置
 st.set_page_config(page_title="A股分析工具箱", layout="wide")
 
@@ -74,7 +74,7 @@ def get_mid_month(year, month):
 st.markdown("### 📈 A股量化分析工具箱")
 
 # 使用标签页区分两个功能模块
-tab1, tab2 = st.tabs(["🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)"])
+tab1, tab2, tab3 = st.tabs(["🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)", "🏆 排行榜"])
 
 # ----------------------------------------------------------------
 # 功能一：基础查询 (保留原功能)
@@ -270,3 +270,74 @@ with tab2:
                         st.warning(f"该年份 ({t2_year}) 数据不足或无法成交。")
                 else:
                     st.error("数据获取失败。")
+
+# ----------------------------------------------------------------
+# Tab 3: 排行榜 (CSV 读取)
+# ----------------------------------------------------------------
+with tab3:
+    st.info("💡 说明：此页面仅展示本地已生成的扫描文件。请先运行 `scanner_sse50.py` 或 `scanner_csi300.py` 生成 CSV。")
+    
+    col3_left, col3_right = st.columns([1, 4])
+    
+    with col3_left:
+        # 选择数据集
+        dataset = st.radio("📊 选择数据集", ["上证50 (SSE50)", "沪深300 (CSI300)"])
+        
+        # 输入年份以匹配文件名
+        scan_year = st.number_input("扫描年份", min_value=2020, max_value=2026, value=2024, step=1)
+        
+        # 构造文件名
+        if "上证50" in dataset:
+            target_file = f"SSE50_Scan_{scan_year}.csv"
+        else:
+            target_file = f"CSI300_Scan_{scan_year}.csv"
+            
+        st.write(f"目标文件: `{target_file}`")
+
+    with col3_right:
+        if os.path.exists(target_file):
+            # 读取 CSV
+            try:
+                df_rank = pd.read_csv(target_file)
+                
+                # 简单的数据概览
+                top_count = 10
+                st.success(f"✅ 成功读取文件，共包含 {len(df_rank)} 只股票数据。")
+                
+                # 展示前10名
+                st.subheader(f"🏆 相对收益最高的 Top {top_count} (适合波段)")
+                st.dataframe(
+                    df_rank.head(top_count).style.highlight_max(subset=['相对超额(%)'], color='#90ee90'), 
+                    use_container_width=True
+                )
+                
+                # 展示后10名
+                st.subheader(f"💀 相对收益最低的 Bottom {top_count} (适合死拿)")
+                st.dataframe(
+                    df_rank.tail(top_count).style.highlight_min(subset=['相对超额(%)'], color='#ffcccb'), 
+                    use_container_width=True
+                )
+                
+                # 完整表格 (带下载)
+                with st.expander("查看完整排行榜"):
+                    st.dataframe(df_rank, use_container_width=True)
+                    csv_data = df_rank.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button("📥 下载完整榜单", csv_data, target_file, "text/csv")
+                    
+            except Exception as e:
+                st.error(f"文件读取出错: {e}")
+        else:
+            st.warning(f"⚠️ 未找到文件 `{target_file}`。")
+            st.markdown("""
+            **可能原因：**
+            1. 你还没有运行扫描脚本。
+            2. 脚本生成的年份和你选择的年份不一致。
+            
+            **解决方法：**
+            请在终端运行：
+            ```bash
+            python scanner_sse50_fixed.py
+            # 或
+            python scanner_csi300.py
+            ```
+            """)
