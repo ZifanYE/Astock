@@ -143,7 +143,7 @@ with tab1:
                     st.error("数据获取失败，请检查代码。")
 
 # ----------------------------------------------------------------
-# 功能二：策略回测 (升级版功能)
+# 功能二：策略回测 (最终修复版：严格月份锁定)
 # ----------------------------------------------------------------
 with tab2:
     col2_input, col2_result = st.columns([1, 3], gap="large")
@@ -167,45 +167,80 @@ with tab2:
     with col2_result:
         if t2_run and t2_code:
             with st.spinner('正在计算跨年收益...'):
-                # 跨年数据
-                df = get_stock_data(t2_code, f"{t2_year}0101", f"{t2_year+1}0228")
+                # 获取跨年数据 (多取2个月防止数据缺失)
+                df = get_stock_data(t2_code, f"{t2_year}0101", f"{t2_year+1}0301")
                 
                 if df is not None:
                     trades = []
+                    # 增加一列 'month_str' 方便快速筛选
+                    df['Year'] = df['日期'].dt.year
+                    df['Month'] = df['日期'].dt.month
+                    
                     for m in range(1, 13):
-                        # 1. 确定买入目标
-                        if "期货" in buy_rule: target_buy = get_futures_delivery(t2_year, m)
-                        elif "期权" in buy_rule: target_buy = get_option_delivery(t2_year, m)
-                        else: target_buy = get_month_end(t2_year, m)
+                        b_date, b_price = None, None
+                        s_date, s_price = None, None
                         
-                        # 2. 确定卖出目标 (下个月)
-                        next_y = t2_year if m < 12 else t2_year + 1
-                        next_m = m + 1 if m < 12 else 1
+                        # ==========================================
+                        # 1. 确定【买入】日期 (严格限定在 m 月)
+                        # ==========================================
+                        curr_month_df = df[(df['Year'] == t2_year) & (df['Month'] == m)]
                         
-                        if "第1个" in sell_rule:
-                            target_sell = datetime.datetime(next_y, next_m, 1)
-                        else:
-                            target_sell = datetime.datetime(next_y, next_m, 15)
+                        if not curr_month_df.empty:
+                            if "最后交易日" in buy_rule:
+                                # 直接取该月最后一行
+                                row = curr_month_df.iloc[-1]
+                                b_date, b_price = row['日期'], row['收盘']
+                            else:
+                                # 期货/期权日 (算出具体日期，然后在当月数据里找最近的)
+                                target_buy = None
+                                if "期货" in buy_rule: target_buy = get_futures_delivery(t2_year, m)
+                                elif "期权" in buy_rule: target_buy = get_option_delivery(t2_year, m)
+                                
+                                if target_buy:
+                                    # 在当月数据里找最近的
+                                    nearest_idx = (curr_month_df['日期'] - target_buy).abs().idxmin()
+                                    b_date = curr_month_df.loc[nearest_idx, '日期']
+                                    b_price = curr_month_df.loc[nearest_idx, '收盘']
+                        
+                        # ==========================================
+                        # 2. 确定【卖出】日期 (严格限定在 下个月)
+                        # ==========================================
+                        if b_date: 
+                            next_y = t2_year if m < 12 else t2_year + 1
+                            next_m = m + 1 if m < 12 else 1
                             
-                        # 3. 获取价格
-                        if target_buy:
-                            b_date, b_price, _ = get_nearest_price_info(target_buy, df)
-                            s_date, s_price, _ = get_nearest_price_info(target_sell, df)
+                            next_month_df = df[(df['Year'] == next_y) & (df['Month'] == next_m)]
                             
-                            if b_price and s_price and s_date > b_date:
-                                trades.append({
-                                    "月份": f"{m}月",
-                                    "买入日期": b_date.strftime("%Y-%m-%d"),
-                                    "买入价": b_price,
-                                    "卖出日期": s_date.strftime("%Y-%m-%d"),
-                                    "卖出价": s_price,
-                                    "收益": s_price - b_price
-                                })
+                            if not next_month_df.empty:
+                                if "第1个" in sell_rule:
+                                    # 直接取下个月的第一行
+                                    row = next_month_df.iloc[0]
+                                    s_date, s_price = row['日期'], row['收盘']
+                                else:
+                                    # 下月15日
+                                    target_sell = datetime.datetime(next_y, next_m, 15)
+                                    nearest_idx = (next_month_df['日期'] - target_sell).abs().idxmin()
+                                    s_date = next_month_df.loc[nearest_idx, '日期']
+                                    s_price = next_month_df.loc[nearest_idx, '收盘']
+                            
+                            # ==========================================
+                            # 3. 记录交易
+                            # ==========================================
+                            if s_date and s_price:
+                                # 双重保险：虽然逻辑上已经跨月，但还是检查一下
+                                if s_date > b_date:
+                                    trades.append({
+                                        "月份": f"{m}月",
+                                        "买入日期": b_date.strftime("%Y-%m-%d"),
+                                        "买入价": b_price,
+                                        "卖出日期": s_date.strftime("%Y-%m-%d"),
+                                        "卖出价": s_price,
+                                        "收益": s_price - b_price
+                                    })
                     
                     if trades:
                         t_df = pd.DataFrame(trades)
                         
-                        # 计算指标
                         first_buy = t_df.iloc[0]['买入价']
                         last_sell = t_df.iloc[-1]['卖出价']
                         total_profit = t_df['收益'].sum()
@@ -214,7 +249,6 @@ with tab2:
                         yield_hold = (last_sell / first_buy) * 100
                         yield_hold_real = yield_hold - 100
                         
-                        # 展示结果
                         st.success(f"回测完成：{t2_code} ({t2_year})")
                         
                         k1, k2, k3 = st.columns(3)
@@ -224,15 +258,14 @@ with tab2:
                         
                         st.markdown("---")
                         
-                        # 格式化表格
                         display_df = t_df.copy()
                         cols = ['买入价', '卖出价', '收益']
                         for c in cols: display_df[c] = display_df[c].apply(lambda x: f"{x:.2f}")
                         
                         st.dataframe(display_df, use_container_width=True, hide_index=True)
                         csv = display_df.to_csv(index=False).encode('utf-8-sig')
-                        st.download_button("📥 导出回测结果", csv, f"{t2_code}_策略回测.csv", "text/csv")
+                        st.download_button("📥 导出结果", csv, f"{t2_code}_策略回测.csv", "text/csv")
                     else:
-                        st.warning("该年份没有足够的交易日数据。")
+                        st.warning(f"该年份 ({t2_year}) 数据不足或无法成交。")
                 else:
                     st.error("数据获取失败。")
