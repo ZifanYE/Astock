@@ -248,13 +248,14 @@ with tab2:
                         yield_strategy = (total_profit / first_buy) * 100
                         yield_hold = (last_sell / first_buy) * 100
                         yield_hold_real = yield_hold - 100
+                        hold_profit = last_sell - first_buy
                         
                         st.success(f"回测完成：{t2_code} ({t2_year})")
                         
                         k1, k2, k3 = st.columns(3)
                         k1.metric("初始投入", f"{first_buy:.2f}")
                         k2.metric("策略收益率 (波段)", f"{yield_strategy:.2f}%", delta=f"{total_profit:.2f}元")
-                        k3.metric("长持收益率 (死拿)", f"{yield_hold:.2f}%", delta=f"{yield_hold_real:.2f}% (涨幅)")
+                        k3.metric("长持收益率 (死拿)", f"{yield_hold_real:.2f}%", delta=f"{hold_profit:.2f}元")
                         
                         st.markdown("---")
                         
