@@ -1,343 +1,80 @@
+# app.py
 import streamlit as st
-import akshare as ak
-import pandas as pd
-import datetime
-import calendar
-import os # 用于检查文件是否存在
-# 1. 页面配置
-st.set_page_config(page_title="A股分析工具箱", layout="wide")
+from streamlit_javascript import st_javascript
+import engine_cn  # 中国市場向けエンジン
+import engine_jp  # 国際市場向けエンジン
 
-# ==========================================
-#              核心工具函数库
-# ==========================================
+# =============================================================================
+# ページ基本設定 (Page Configuration)
+# =============================================================================
+st.set_page_config(page_title="Quant Analysis Terminal", layout="wide")
 
-@st.cache_data(ttl=3600) # 增加简单的缓存，避免重复请求
-def get_stock_data(symbol, start_date, end_date):
-    """获取日线数据"""
-    try:
-        # adjust="qfq" 前复权
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
-        if df.empty: return None
-        df['日期'] = pd.to_datetime(df['日期'])
-        return df[['日期', '收盘']]
-    except Exception as e:
-        return None
+# =============================================================================
+# UIカスタマイズ CSS (UI Customization)
+# =============================================================================
+st.markdown("""
+    <style>
+        /* サイドバーを完全に非表示にする */
+        [data-testid="stSidebar"] { display: none; }
+        /* メインコンテンツエリアの上部余白を極限まで削る */
+        .block-container {
+            padding-top: 0.5rem !important;
+            padding-bottom: 0rem !important;
+            padding-left: 2rem !important;
+            padding-right: 2rem !important;
+        }
+        /* ヘッダー(メニュー)を非表示 */
+        [data-testid="stHeader"] { display: none; }
+        /* ボタンの配置を調整 */
+        .stButton button {
+            border-radius: 5px;
+            padding: 2px 10px;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-def get_nearest_price_info(target_date, df):
-    """
-    寻找最近交易日信息
-    返回: (实际日期, 收盘价, 差异天数说明)
-    """
-    if df is None or df.empty:
-        return None, None, ""
-        
-    # 找绝对值最小的时间差
-    nearest_idx = (df['日期'] - target_date).abs().idxmin()
-    actual_date = df.loc[nearest_idx, '日期']
-    price = df.loc[nearest_idx, '收盘']
-    
-    diff_days = (actual_date - target_date).days
-    
-    note = "当日"
-    if diff_days > 0: note = f"延后{diff_days}天"
-    elif diff_days < 0: note = f"提前{abs(diff_days)}天"
-    
-    return actual_date, price, note
+# =============================================================================
+# 言語検知とセッション管理 (Language Detection & Session State)
+# =============================================================================
 
-# --- 日期规则计算 ---
+# ブラウザ言語を取得 (Navigator.language)
+browser_lang = st_javascript("navigator.language")
 
-def get_futures_delivery(year, month):
-    """期货交割日：第3个周五"""
-    c = calendar.monthcalendar(year, month)
-    fridays = [week[4] for week in c if week[4] != 0]
-    return datetime.datetime(year, month, fridays[2]) if len(fridays) >= 3 else None
+# セッション状態の初期化
+if "lang_mode" not in st.session_state:
+    st.session_state.lang_mode = None
 
-def get_option_delivery(year, month):
-    """期权交割日：第4个周三"""
-    c = calendar.monthcalendar(year, month)
-    wednesdays = [week[2] for week in c if week[2] != 0]
-    return datetime.datetime(year, month, wednesdays[3]) if len(wednesdays) >= 4 else None
+# 初回アクセス時のみ自動判定を実行
+if st.session_state.lang_mode is None and browser_lang:
+    if "ja" in browser_lang.lower():
+        st.session_state.lang_mode = "JP"
+    else:
+        st.session_state.lang_mode = "CN"
 
-def get_month_end(year, month):
-    """月末最后一天"""
-    _, last_day = calendar.monthrange(year, month)
-    return datetime.datetime(year, month, last_day)
+# 万が一取得できない場合のデフォルト値
+if st.session_state.lang_mode is None:
+    st.session_state.lang_mode = "CN"
 
-def get_mid_month(year, month):
-    """月中15号"""
-    return datetime.datetime(year, month, 15)
+# =============================================================================
+# 右上角切り替えボタン (Top Right Language Toggle)
+# =============================================================================
+# タイトル行と同じ高さに切り替えボタンを配置
+head_col1, head_col2 = st.columns([10, 1])
 
-# ==========================================
-#                主界面逻辑
-# ==========================================
+with head_col2:
+    # 現在のモードの反対をボタンに表示
+    toggle_label = "日/中"
+    if st.button(toggle_label, help="Switch Language / 言語切り替え"):
+        # モードを反転させる
+        st.session_state.lang_mode = "JP" if st.session_state.lang_mode == "CN" else "CN"
+        st.rerun()
 
-st.markdown("### 📈 A股量化分析工具箱")
-
-# 使用标签页区分两个功能模块
-tab1, tab2, tab3 = st.tabs(["🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)", "🏆 排行榜"])
-
-# ----------------------------------------------------------------
-# 功能一：基础查询 (保留原功能)
-# ----------------------------------------------------------------
-with tab1:
-    col1_input, col1_result = st.columns([1, 3], gap="large")
-    
-    with col1_input:
-        with st.container(border=True):
-            st.caption("查询设置")
-            t1_code = st.text_input("股票代码", value="600519", key="t1_code")
-            cur_year = datetime.datetime.now().year
-            t1_year = st.number_input("年份", min_value=2000, max_value=cur_year, value=cur_year, key="t1_year")
-            
-            t1_mode_sel = st.radio(
-                "日期模式",
-                ("A: 月中(15日) & 月底", "B: 期货(第3周五) & 期权(第4周三)"),
-                key="t1_mode"
-            )
-            t1_run = st.button("查询股价", type="primary", use_container_width=True, key="t1_btn")
-
-    with col1_result:
-        if t1_run and t1_code:
-            with st.spinner('正在查询...'):
-                df = get_stock_data(t1_code, f"{t1_year}0101", f"{t1_year}1231")
-                if df is not None:
-                    target_list = []
-                    mode = "A" if "A:" in t1_mode_sel else "B"
-                    
-                    for m in range(1, 13):
-                        today = datetime.datetime.now()
-                        dates_to_check = []
-                        
-                        if mode == "A":
-                            dates_to_check = [
-                                ("月中", get_mid_month(t1_year, m)), 
-                                ("月底", get_month_end(t1_year, m))
-                            ]
-                        else:
-                            f_day = get_futures_delivery(t1_year, m)
-                            o_day = get_option_delivery(t1_year, m)
-                            if f_day: dates_to_check.append(("期货交割日", f_day))
-                            if o_day: dates_to_check.append(("期权交割日", o_day))
-                        
-                        for type_name, dt in dates_to_check:
-                            if dt <= today:
-                                act_date, price, note = get_nearest_price_info(dt, df)
-                                if price is not None:
-                                    target_list.append({
-                                        "月份": f"{dt.strftime('%m')}月",
-                                        "类型": type_name,
-                                        "目标日期": dt.strftime("%Y-%m-%d"),
-                                        "实际交易日": act_date.strftime("%Y-%m-%d"),
-                                        "收盘价": f"{price:.2f}",
-                                        "说明": note
-                                    })
-                    
-                    if target_list:
-                        res_df = pd.DataFrame(target_list)
-                        st.dataframe(res_df, use_container_width=True)
-                        csv = res_df.to_csv(index=False).encode('utf-8-sig')
-                        st.download_button("📥 导出CSV", csv, f"{t1_code}_{t1_year}_基础查询.csv", "text/csv")
-                    else:
-                        st.info("没有符合日期的历史数据。")
-                else:
-                    st.error("数据获取失败，请检查代码。")
-
-# ----------------------------------------------------------------
-# 功能二：策略回测 (最终修复版：严格月份锁定)
-# ----------------------------------------------------------------
-with tab2:
-    col2_input, col2_result = st.columns([1, 3], gap="large")
-    
-    with col2_input:
-        with st.container(border=True):
-            st.caption("回测参数")
-            t2_code = st.text_input("股票代码", value="600519", key="t2_code")
-            t2_year = st.number_input("回测年份", min_value=2010, max_value=cur_year, value=cur_year-1, key="t2_year")
-            
-            st.divider()
-            
-            buy_rule = st.selectbox("🔵 买入点", 
-                ["本月期货交割日(第3周五)", "本月期权交割日(第4周三)", "本月最后交易日"], key="buy_rule")
-            
-            sell_rule = st.selectbox("🔴 卖出点", 
-                ["下月第1个交易日", "下月15日(或最近交易日)"], key="sell_rule")
-            
-            t2_run = st.button("开始回测", type="primary", use_container_width=True, key="t2_btn")
-
-    with col2_result:
-        if t2_run and t2_code:
-            with st.spinner('正在计算跨年收益...'):
-                # 获取跨年数据 (多取2个月防止数据缺失)
-                df = get_stock_data(t2_code, f"{t2_year}0101", f"{t2_year+1}0301")
-                
-                if df is not None:
-                    trades = []
-                    # 增加一列 'month_str' 方便快速筛选
-                    df['Year'] = df['日期'].dt.year
-                    df['Month'] = df['日期'].dt.month
-                    
-                    for m in range(1, 13):
-                        b_date, b_price = None, None
-                        s_date, s_price = None, None
-                        
-                        # ==========================================
-                        # 1. 确定【买入】日期 (严格限定在 m 月)
-                        # ==========================================
-                        curr_month_df = df[(df['Year'] == t2_year) & (df['Month'] == m)]
-                        
-                        if not curr_month_df.empty:
-                            if "最后交易日" in buy_rule:
-                                # 直接取该月最后一行
-                                row = curr_month_df.iloc[-1]
-                                b_date, b_price = row['日期'], row['收盘']
-                            else:
-                                # 期货/期权日 (算出具体日期，然后在当月数据里找最近的)
-                                target_buy = None
-                                if "期货" in buy_rule: target_buy = get_futures_delivery(t2_year, m)
-                                elif "期权" in buy_rule: target_buy = get_option_delivery(t2_year, m)
-                                
-                                if target_buy:
-                                    # 在当月数据里找最近的
-                                    nearest_idx = (curr_month_df['日期'] - target_buy).abs().idxmin()
-                                    b_date = curr_month_df.loc[nearest_idx, '日期']
-                                    b_price = curr_month_df.loc[nearest_idx, '收盘']
-                        
-                        # ==========================================
-                        # 2. 确定【卖出】日期 (严格限定在 下个月)
-                        # ==========================================
-                        if b_date: 
-                            next_y = t2_year if m < 12 else t2_year + 1
-                            next_m = m + 1 if m < 12 else 1
-                            
-                            next_month_df = df[(df['Year'] == next_y) & (df['Month'] == next_m)]
-                            
-                            if not next_month_df.empty:
-                                if "第1个" in sell_rule:
-                                    # 直接取下个月的第一行
-                                    row = next_month_df.iloc[0]
-                                    s_date, s_price = row['日期'], row['收盘']
-                                else:
-                                    # 下月15日
-                                    target_sell = datetime.datetime(next_y, next_m, 15)
-                                    nearest_idx = (next_month_df['日期'] - target_sell).abs().idxmin()
-                                    s_date = next_month_df.loc[nearest_idx, '日期']
-                                    s_price = next_month_df.loc[nearest_idx, '收盘']
-                            
-                            # ==========================================
-                            # 3. 记录交易
-                            # ==========================================
-                            if s_date and s_price:
-                                # 双重保险：虽然逻辑上已经跨月，但还是检查一下
-                                if s_date > b_date:
-                                    trades.append({
-                                        "月份": f"{m}月",
-                                        "买入日期": b_date.strftime("%Y-%m-%d"),
-                                        "买入价": b_price,
-                                        "卖出日期": s_date.strftime("%Y-%m-%d"),
-                                        "卖出价": s_price,
-                                        "收益": s_price - b_price
-                                    })
-                    
-                    if trades:
-                        t_df = pd.DataFrame(trades)
-                        
-                        first_buy = t_df.iloc[0]['买入价']
-                        last_sell = t_df.iloc[-1]['卖出价']
-                        total_profit = t_df['收益'].sum()
-                        
-                        yield_strategy = (total_profit / first_buy) * 100
-                        yield_hold = (last_sell / first_buy) * 100
-                        yield_hold_real = yield_hold - 100
-                        hold_profit = last_sell - first_buy
-                        
-                        st.success(f"回测完成：{t2_code} ({t2_year})")
-                        
-                        k1, k2, k3 = st.columns(3)
-                        k1.metric("初始投入", f"{first_buy:.2f}")
-                        k2.metric("策略收益率 (波段)", f"{yield_strategy:.2f}%", delta=f"{total_profit:.2f}元")
-                        k3.metric("长持收益率 (死拿)", f"{yield_hold_real:.2f}%", delta=f"{hold_profit:.2f}元")
-                        
-                        st.markdown("---")
-                        
-                        display_df = t_df.copy()
-                        cols = ['买入价', '卖出价', '收益']
-                        for c in cols: display_df[c] = display_df[c].apply(lambda x: f"{x:.2f}")
-                        
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
-                        csv = display_df.to_csv(index=False).encode('utf-8-sig')
-                        st.download_button("📥 导出结果", csv, f"{t2_code}_策略回测.csv", "text/csv")
-                    else:
-                        st.warning(f"该年份 ({t2_year}) 数据不足或无法成交。")
-                else:
-                    st.error("数据获取失败。")
-
-# ----------------------------------------------------------------
-# Tab 3: 排行榜 (CSV 读取)
-# ----------------------------------------------------------------
-with tab3:
-    st.info("💡 说明：此页面仅展示本地已生成的扫描文件。请先运行 `scanner_sse50.py` 或 `scanner_csi300.py` 生成 CSV。")
-    
-    col3_left, col3_right = st.columns([1, 4])
-    
-    with col3_left:
-        # 选择数据集
-        dataset = st.radio("📊 选择数据集", ["上证50 (SSE50)", "沪深300 (CSI300)"])
-        
-        # 输入年份以匹配文件名
-        scan_year = st.number_input("扫描年份", min_value=2020, max_value=2026, value=2024, step=1)
-        
-        # 构造文件名
-        if "上证50" in dataset:
-            target_file = f"SSE50_Scan_{scan_year}.csv"
-        else:
-            target_file = f"CSI300_Scan_{scan_year}.csv"
-            
-        st.write(f"目标文件: `{target_file}`")
-
-    with col3_right:
-        if os.path.exists(target_file):
-            # 读取 CSV
-            try:
-                df_rank = pd.read_csv(target_file)
-                
-                # 简单的数据概览
-                top_count = 10
-                st.success(f"✅ 成功读取文件，共包含 {len(df_rank)} 只股票数据。")
-                
-                # 展示前10名
-                st.subheader(f"🏆 相对收益最高的 Top {top_count} (适合波段)")
-                st.dataframe(
-                    df_rank.head(top_count).style.highlight_max(subset=['相对超额(%)'], color='#90ee90'), 
-                    use_container_width=True
-                )
-                
-                # 展示后10名
-                st.subheader(f"💀 相对收益最低的 Bottom {top_count} (适合死拿)")
-                st.dataframe(
-                    df_rank.tail(top_count).style.highlight_min(subset=['相对超额(%)'], color='#ffcccb'), 
-                    use_container_width=True
-                )
-                
-                # 完整表格 (带下载)
-                with st.expander("查看完整排行榜"):
-                    st.dataframe(df_rank, use_container_width=True)
-                    csv_data = df_rank.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button("📥 下载完整榜单", csv_data, target_file, "text/csv")
-                    
-            except Exception as e:
-                st.error(f"文件读取出错: {e}")
-        else:
-            st.warning(f"⚠️ 未找到文件 `{target_file}`。")
-            st.markdown("""
-            **可能原因：**
-            1. 你还没有运行扫描脚本。
-            2. 脚本生成的年份和你选择的年份不一致。
-            
-            **解决方法：**
-            请在终端运行：
-            ```bash
-            python scanner_sse50_fixed.py
-            # 或
-            python scanner_csi300.py
-            ```
-            """)
+# =============================================================================
+# エンジンの実行 (Execution)
+# =============================================================================
+if st.session_state.lang_mode == "JP":
+    # 日本語モード (International)
+    engine_jp.render_jp_ui()
+else:
+    # 中国語モード (A-Share)
+    engine_cn.render_cn_ui()
