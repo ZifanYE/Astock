@@ -1,80 +1,82 @@
 # app.py
 import streamlit as st
 from streamlit_javascript import st_javascript
-import engine_cn  # 中国市場向けエンジン
-import engine_jp  # 国際市場向けエンジン
+import engine_cn
+import engine_jp
+import time
 
 # =============================================================================
-# ページ基本設定 (Page Configuration)
+# 1. ページ構成とUIレイアウトの最適化 (CSS)
 # =============================================================================
+# ページ設定：タイトルおよびワイドレイアウトの有効化
 st.set_page_config(page_title="Quant Analysis Terminal", layout="wide")
 
-# =============================================================================
-# UIカスタマイズ CSS (UI Customization)
-# =============================================================================
+# CSSインジェクション：サイドバーの非表示、上部余白の最小化、ヘッダーの削除
 st.markdown("""
     <style>
-        /* サイドバーを完全に非表示にする */
         [data-testid="stSidebar"] { display: none; }
-        /* メインコンテンツエリアの上部余白を極限まで削る */
+        [data-testid="stHeader"] { display: none; }
         .block-container {
             padding-top: 0.5rem !important;
-            padding-bottom: 0rem !important;
             padding-left: 2rem !important;
             padding-right: 2rem !important;
-        }
-        /* ヘッダー(メニュー)を非表示 */
-        [data-testid="stHeader"] { display: none; }
-        /* ボタンの配置を調整 */
-        .stButton button {
-            border-radius: 5px;
-            padding: 2px 10px;
         }
     </style>
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# 言語検知とセッション管理 (Language Detection & Session State)
+# 2. 言語検知ロジック (URLパラメータ > JavaScript検知)
 # =============================================================================
 
-# ブラウザ言語を取得 (Navigator.language)
+# URLパラメータの確認 (例: ?lang=jp)
+# クエリパラメータによる強制ルーティングを最優先する
+url_lang = st.query_params.get("lang", "").lower()
+
+# JavaScript経由でブラウザの言語設定 (navigator.language) を取得
 browser_lang = st_javascript("navigator.language")
 
-# セッション状態の初期化
+# セッション状態 (st.session_state) の初期化
 if "lang_mode" not in st.session_state:
     st.session_state.lang_mode = None
 
-# 初回アクセス時のみ自動判定を実行
-if st.session_state.lang_mode is None and browser_lang:
-    if "ja" in browser_lang.lower():
-        st.session_state.lang_mode = "JP"
-    else:
-        st.session_state.lang_mode = "CN"
-
-# 万が一取得できない場合のデフォルト値
+# 言語判定ロジック：
+# 1. URLパラメータが存在すればそれを優先
+# 2. 次にJavaScriptの取得結果に基づいて判定
+# 3. 取得待ちの状態では初期値を設定しない（Race Condition対策）
 if st.session_state.lang_mode is None:
-    st.session_state.lang_mode = "CN"
+    if url_lang == "jp":
+        st.session_state.lang_mode = "JP"
+    elif browser_lang: # JavaScriptの実行結果が返ってきた場合
+        if "ja" in browser_lang.lower():
+            st.session_state.lang_mode = "JP"
+        else:
+            st.session_state.lang_mode = "CN"
+    else:
+        # 非同期処理の遅延中は判定を保留
+        pass
 
 # =============================================================================
-# 右上角切り替えボタン (Top Right Language Toggle)
+# 3. 右上部の言語切り替えボタン (日/中 トグル)
 # =============================================================================
-# タイトル行と同じ高さに切り替えボタンを配置
-head_col1, head_col2 = st.columns([10, 1])
-
-with head_col2:
-    # 現在のモードの反対をボタンに表示
-    toggle_label = "日/中"
-    if st.button(toggle_label, help="Switch Language / 言語切り替え"):
-        # モードを反転させる
-        st.session_state.lang_mode = "JP" if st.session_state.lang_mode == "CN" else "CN"
+# タイトル行と同じ高さにボタンを配置するためのカラムレイアウト
+h_col1, h_col2 = st.columns([12, 1])
+with h_col2:
+    if st.button("日/中"):
+        # 未初期化状態でのクリックを考慮し、現在のステータスを反転させる
+        current = st.session_state.lang_mode if st.session_state.lang_mode else "CN"
+        st.session_state.lang_mode = "JP" if current == "CN" else "CN"
+        # 状態変更後に即時再レンダリングを実行
         st.rerun()
 
 # =============================================================================
-# エンジンの実行 (Execution)
+# 4. エンジンの実行とルーティング
 # =============================================================================
-if st.session_state.lang_mode == "JP":
-    # 日本語モード (International)
+# 最終的なフォールバック：検知が完了していない場合はデフォルト(CN)を使用
+final_mode = st.session_state.lang_mode if st.session_state.lang_mode else "CN"
+
+if final_mode == "JP":
+    # 日本市場向けエンジン (engine_jp.py) を実行
     engine_jp.render_jp_ui()
 else:
-    # 中国語モード (A-Share)
+    # 中国市場向けエンジン (engine_cn.py) を実行
     engine_cn.render_cn_ui()
