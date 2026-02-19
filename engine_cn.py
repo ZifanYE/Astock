@@ -5,7 +5,35 @@ import pandas as pd
 import datetime
 import calendar
 import os
+import json
+import trade_test as trade
 
+def load_all_users():
+    """读取所有用户信息"""
+    db_path = "user_data.json"
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+        return {}
+    try:
+        with open(db_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_all_users(all_users):
+    """保存所有用户字典"""
+    with open("user_data.json", "w", encoding="utf-8") as f:
+        json.dump(all_users, f, indent=4, ensure_ascii=False)
+
+def get_default_profile(nickname):
+    return {
+        "nickname": nickname,
+        "color": "#FF4B4B",
+        "balance": 100000.0,
+        "holdings": {},
+        "history": [],    # 新增：记录每一笔买卖
+        "asset_log": [],  # 新增：记录每日总资产 [日期, 金额]
+        "avatar": "👩‍💻"
+    }
 # =============================================================================
 # 核心ツール関数ライブラリ (Core Utility Functions)
 # =============================================================================
@@ -113,12 +141,15 @@ def render_cn_ui():
     st.markdown("### 📈 A股量化分析工具箱")
 
     # タブによる機能モジュールの分離
-    tab1, tab2, tab3 = st.tabs(["🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)", "🏆 排行榜"])
-
+    #tab1, tab2, tab3, tab4 = st.tabs(["🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)", "🏆 排行榜", "💼 模拟交易"])
+    tab1, tab2, tab3, tab4 = st.tabs(["💼 模拟交易", "🔍 基础查询 (特定日期股价)","📊 策略回测 (波段 vs 长持)", "🏆 排行榜"])
     # ----------------------------------------------------------------
     # 機能1：基礎照会 (Original Functionality)
     # ----------------------------------------------------------------
     with tab1:
+        render_trade_ui()
+
+    with tab2:
         col1_input, col1_result = st.columns([1, 3], gap="large")
         
         with col1_input:
@@ -176,7 +207,7 @@ def render_cn_ui():
     # ----------------------------------------------------------------
     # 機能2：策略バックテスト (Strict Monthly Validation)
     # ----------------------------------------------------------------
-    with tab2:
+    with tab3:
         col2_input, col2_result = st.columns([1, 3], gap="large")
         
         with col2_input:
@@ -248,7 +279,7 @@ def render_cn_ui():
     # ----------------------------------------------------------------
     # 功能3：ランキング (CSV Reader)
     # ----------------------------------------------------------------
-    with tab3:
+    with tab4:
         st.info("💡 说明：此页面仅展示本地已生成的扫描文件。")
         col3_left, col3_right = st.columns([1, 4])
         with col3_left:
@@ -266,6 +297,163 @@ def render_cn_ui():
             else:
                 st.warning(f"⚠️ 未找到文件 `{target_file}`。")
 
+
+
+
+    
     with monitor_placeholder.container():
         # 这里放置你的标题和 render_mainstream_monitor 逻辑
         render_mainstream_monitor()
+
+def render_trade_ui():
+    # 使用 session_state 记录当前登录状态
+    if "current_user" not in st.session_state:
+        st.session_state.current_user = None
+
+    all_users = load_all_users()
+
+    # --- 1. 登录/注册界面 ---
+    if st.session_state.current_user is None:
+        st.markdown("#### 👤 登录量化账户")
+        login_name = st.text_input("请输入您的昵称", placeholder="例如: Zifan_Quant")
+        if st.button("进入账户", type="primary"):
+            if login_name:
+                if login_name in all_users:
+                    st.success(f"欢迎回来，{login_name}！已继承您的账户余额。")
+                else:
+                    all_users[login_name] = get_default_profile(login_name)
+                    save_all_users(all_users)
+                    st.info(f"已为您创建新账户：{login_name}，初始资金 ¥100,000.00")
+                
+                st.session_state.current_user = login_name
+                st.rerun()
+            else:
+                st.warning("昵称不能为空")
+        return # 登录前不显示后续交易内容
+
+    # --- 2. 交易看板 (已登录) ---
+    curr_name = st.session_state.current_user
+    user = all_users[curr_name]
+
+    user = trade.update_asset_log(user) 
+    all_users[curr_name] = user
+    save_all_users(all_users)
+
+# 1. 重新定义四列布局 [头像, 昵称余额, 资产曲线, 退出按钮]
+    # 比例建议：0.6 (头像) : 2 (信息) : 4 (图表) : 1 (退出)
+    col_p1, col_p2, col_p3, col_p4 = st.columns([0.6, 2, 4, 1], vertical_alignment="center")
+
+    with col_p1:
+        st.markdown(f"<h1 style='text-align: center; margin:0;'>{user['avatar']}</h1>", unsafe_allow_html=True)
+
+    with col_p2:
+        st.markdown(f"**{user['nickname']}**", unsafe_allow_html=True)
+        st.write(f"💰 ¥{user['balance']:,.2f}")
+
+    with col_p3:
+        if user.get('asset_log') and len(user['asset_log']) > 1:
+            df_log = pd.DataFrame(user['asset_log'])
+            
+            # --- 1. 修复报错：color 必须是列表 ---
+            chart_color = [user.get('color', '#FF4B4B')]
+            
+            # --- 2. 进阶：使用 Altair 实现真正的“金融自适应” ---
+            # 原生 st.area_chart 无法关闭“包含0”，导致波动看不见。
+            # 我们用 Streamlit 内置的 altair 库来画，效果秒杀原生。
+            import altair as alt
+            
+            chart = alt.Chart(df_log).mark_area(
+                line={'color': chart_color[0]},
+                color=alt.Gradient(
+                    gradient='linear',
+                    stops=[alt.GradientStop(color=chart_color[0], offset=1),
+                           alt.GradientStop(color='white', offset=0)],
+                    x1=1, x2=1, y1=1, y2=0
+                )
+            ).encode(
+                x=alt.X('time:N', axis=alt.Axis(labels=False, ticks=False, title=None)),
+                y=alt.Y('total:Q', scale=alt.Scale(zero=False), title=None), # zero=False 是自适应的关键
+                tooltip=['time', 'total']
+            ).properties(height=100)
+
+            st.altair_chart(chart, use_container_width=True)
+            
+        else:
+            st.caption("📈 待交易数据入场...")
+            st.progress(0.1)
+
+    with col_p4:
+        if st.button("退出", use_container_width=True, key="logout_btn"):
+            st.session_state.current_user = None
+            st.rerun()
+    st.divider()
+
+# --- B. 交易操作 (保持原有代码) ---
+# --- 3. 交易操作与持仓 ---
+    c1, c2, c3 = st.columns(3)
+    t_code = c1.text_input("标的代码", value="510300")
+    t_qty = c2.number_input("交易数量", min_value=100, step=100)
+    
+    op_c1, op_c2 = c3.columns(2)
+    st.write(" ") # 占位
+    
+    if op_c1.button("买入", type="primary", use_container_width=True):
+        # 1. 创建状态容器
+        with st.status("正在撮合交易...", expanded=True) as status:
+            st.write("📡 正在连接行情接口...")
+            # 这里调用你的接口
+            success, msg, updated_user = trade.process_buy(user, t_code, t_qty)
+            
+            if success:
+                st.write("💰 正在进行资金清算...")
+                updated_user = trade.update_asset_log(updated_user) 
+                all_users[curr_name] = updated_user
+                save_all_users(all_users)
+                st.write("📝 正在同步本地账本...")
+                status.update(label="✅ 交易已撮合成功", state="complete", expanded=False)
+                st.toast(msg) # 小弹窗提示
+                st.rerun()
+            else:
+                status.update(label="❌ 交易失败", state="error", expanded=True)
+                st.error(msg)
+
+    if op_c2.button("卖出", type="primary", use_container_width=True):
+        # 1. 创建状态容器
+        with st.status("正在撮合交易...", expanded=True) as status:
+            st.write("📡 正在连接行情接口...")
+            # 这里调用你的接口
+            success, msg, updated_user = trade.process_sell(user, t_code, t_qty)
+            
+            if success:
+                st.write("💰 正在进行资金清算...")
+                updated_user = trade.update_asset_log(updated_user) 
+                all_users[curr_name] = updated_user
+                save_all_users(all_users)
+                st.write("📝 正在同步本地账本...")
+                status.update(label="✅ 交易已撮合成功", state="complete", expanded=False)
+                st.toast(msg) # 小弹窗提示
+                st.rerun()
+            else:
+                status.update(label="❌ 交易失败", state="error", expanded=True)
+                st.error(msg)
+
+    # 显示持仓表
+    st.subheader("📦 当前持仓明细")
+    if user['holdings']:
+        # 使用 st.dataframe 效果比 st.table 更专业，支持排序
+        st.dataframe(
+            pd.DataFrame([{"代码": k, "数量": v} for k, v in user['holdings'].items()]),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.caption("暂无持仓")
+    
+    # --- C. 交易历史明细 ---
+    with st.expander("🕒 查看交易历史记录", expanded=False):
+        if user['history']:
+            # 倒序显示，最新的在上面
+            history_df = pd.DataFrame(user['history']).iloc[::-1]
+            st.dataframe(history_df, use_container_width=True, hide_index=True)
+        else:
+            st.write("暂无成交记录")
