@@ -98,7 +98,13 @@ def render_cn_ui():
     中国市場（A株）向けのメインUI。UI上の表記はすべて中国語を維持する。
     """
     st.markdown("#### 🚀 主流今日监测 (ROC 25D)")
-    render_mainstream_monitor()
+    #render_mainstream_monitor()
+    # 1. 在最上方创建一个占位符
+    monitor_placeholder = st.empty()
+    
+    # 2. 占位符先显示一个“加载中”的状态，避免顶部空出一块很奇怪
+    with monitor_placeholder.container():
+        st.caption("正在实时获取市场动量数据... ⏳")
 
     st.markdown("### 📈 A股量化分析工具箱")
 
@@ -255,3 +261,7 @@ def render_cn_ui():
                     st.error(f"文件读取出错: {e}")
             else:
                 st.warning(f"⚠️ 未找到文件 `{target_file}`。")
+
+    with monitor_placeholder.container():
+        # 这里放置你的标题和 render_mainstream_monitor 逻辑
+        render_mainstream_monitor()
