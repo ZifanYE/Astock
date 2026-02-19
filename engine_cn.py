@@ -26,6 +26,24 @@ def get_stock_data(symbol, start_date, end_date):
     except Exception as e:
         return None
 
+def render_mainstream_monitor():
+    assets = {
+        "510300": "沪深300 ETF",
+        "159949": "创业板50 ETF",
+        "563300": "中证2000 ETF",
+        "518880": "黄金 ETF"
+    }
+    cols = st.columns(4)
+    for i, (code, name) in enumerate(assets.items()):
+        # 获取ETF前复权历史数据
+        df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
+        if not df.empty and len(df) >= 26:
+            curr = df['收盘'].iloc[-1]
+            prev = df['收盘'].iloc[-26]
+            roc = ((curr / prev) - 1) * 100
+            cols[i].metric(label=name, value=f"{curr:.3f}", delta=f"{roc:.2f}%")
+
+
 def get_nearest_price_info(target_date, df):
     """
     ターゲット日に最も近い取引日の情報を検索する
@@ -79,6 +97,9 @@ def render_cn_ui():
     """
     中国市場（A株）向けのメインUI。UI上の表記はすべて中国語を維持する。
     """
+    st.markdown("#### 🚀 主流今日监测 (ROC 25D)")
+    render_mainstream_monitor()
+
     st.markdown("### 📈 A股量化分析工具箱")
 
     # タブによる機能モジュールの分離
