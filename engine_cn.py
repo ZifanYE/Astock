@@ -397,7 +397,7 @@ def render_trade_ui():
     op_c1, op_c2 = c3.columns(2)
     st.write(" ") # 占位
     
-    if op_c1.button("买入", type="primary", use_container_width=True):
+    if op_c1.button("买入", type="primary", width="stretch"):
         # 1. 创建状态容器
         with st.status("正在撮合交易...", expanded=True) as status:
             st.write("📡 正在连接行情接口...")
@@ -417,7 +417,7 @@ def render_trade_ui():
                 status.update(label="❌ 交易失败", state="error", expanded=True)
                 st.error(msg)
 
-    if op_c2.button("卖出", type="primary", use_container_width=True):
+    if op_c2.button("卖出", type="primary", width="stretch"):
         # 1. 创建状态容器
         with st.status("正在撮合交易...", expanded=True) as status:
             st.write("📡 正在连接行情接口...")
@@ -443,7 +443,7 @@ def render_trade_ui():
         # 使用 st.dataframe 效果比 st.table 更专业，支持排序
         st.dataframe(
             pd.DataFrame([{"代码": k, "数量": v} for k, v in user['holdings'].items()]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
     else:
