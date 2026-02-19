@@ -26,22 +26,26 @@ def get_stock_data(symbol, start_date, end_date):
     except Exception as e:
         return None
 
-def render_mainstream_monitor():
-    assets = {
-        "510300": "沪深300 ETF",
-        "159949": "创业板50 ETF",
-        "563300": "中证2000 ETF",
-        "518880": "黄金 ETF"
-    }
-    cols = st.columns(4)
-    for i, (code, name) in enumerate(assets.items()):
-        # 获取ETF前复权历史数据
+# 1. 专门把数据获取和计算逻辑抽离出来，并加缓存
+@st.cache_data(ttl=600) # 缓存10分钟，10分钟内点击查询不会重测
+def get_monitor_data():
+    assets = {"510300": "沪深300 ETF", "159949": "创业板50 ETF", "563300": "中证2000 ETF", "518880": "黄金 ETF"}
+    results = []
+    for code, name in assets.items():
         df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
         if not df.empty and len(df) >= 26:
             curr = df['收盘'].iloc[-1]
             prev = df['收盘'].iloc[-26]
             roc = ((curr / prev) - 1) * 100
-            cols[i].metric(label=name, value=f"{curr:.3f}", delta=f"{roc:.2f}%")
+            results.append({"name": name, "curr": curr, "roc": roc})
+    return results
+
+# 2. 修改渲染函数
+def render_mainstream_monitor():
+    data = get_monitor_data() # 这里会触发缓存机制
+    cols = st.columns(4)
+    for i, item in enumerate(data):
+        cols[i].metric(label=item["name"], value=f"{item['curr']:.3f}", delta=f"{item['roc']:.2f}%")
 
 
 def get_nearest_price_info(target_date, df):
