@@ -6,7 +6,13 @@ import datetime
 import calendar
 import os
 import json
-import trade_test as trade
+import time
+import altair as alt
+import trade_test as trade  # 请确保你的 trade_test.py 文件在同级目录
+
+# =============================================================================
+# 1. 用户管理系统
+# =============================================================================
 
 def load_all_users():
     """读取所有用户信息"""
@@ -30,75 +36,79 @@ def get_default_profile(nickname):
         "color": "#FF4B4B",
         "balance": 100000.0,
         "holdings": {},
-        "history": [],    # 新增：记录每一笔买卖
-        "asset_log": [],  # 新增：记录每日总资产 [日期, 金额]
+        "history": [],    # 记录买卖明细
+        "asset_log": [],  # 记录每日总资产 [日期, 金额]
         "avatar": "👩‍💻"
     }
+
 # =============================================================================
-# 核心ツール関数ライブラリ (Core Utility Functions)
+# 2. 核心行情函数 (解决 IP 被 Ban 的平替方案)
 # =============================================================================
 
-@st.cache_data(ttl=3600) # キャッシュを有効化し、リクエストの重複を避ける
+@st.cache_data(ttl=3600)
 def get_stock_data(symbol, start_date, end_date):
-    """
-    日次データを取得する関数
-    引数: symbol(銘柄コード), start_date(開始日), end_date(終了日)
-    戻り値: 日付と終値を含むDataFrame
-    """
+    """日次データ取得。EM接口被封时自动切换到Sina接口"""
     try:
-        # adjust="qfq" は前復権（株式分割等の調整済み価格）を意味する
+        # 路径 A: 东方财富接口
         df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
-        if df.empty: return None
-        df['日期'] = pd.to_datetime(df['日期'])
-        return df[['日期', '收盘']]
-    except Exception as e:
-        return None
+        if df is not None and not df.empty:
+            df['日期'] = pd.to_datetime(df['日期'])
+            return df[['日期', '收盘']]
+    except:
+        try:
+            # 路径 B: 新浪源平替（封锁限制极少）
+            df = ak.stock_zh_a_daily(symbol=f"sh{symbol}" if symbol.startswith('6') else f"sz{symbol}", 
+                                    start_date=start_date, end_date=end_date)
+            if df is not None and not df.empty:
+                df = df.rename(columns={'close': '收盘'})
+                df['日期'] = pd.to_datetime(df.index)
+                return df[['日期', '收盘']]
+        except:
+            return None
+    return None
 
-# 1. 专门把数据获取和计算逻辑抽离出来，并加缓存
-@st.cache_data(ttl=600) # 缓存10分钟，10分钟内点击查询不会重测
+@st.cache_data(ttl=600)
 def get_monitor_data():
+    """主流监控。放弃 fund_etf_hist_em (EM)，改用分类快照 (Sina)"""
     assets = {"510300": "沪深300 ETF", "159949": "创业板50 ETF", "563300": "中证2000 ETF", "518880": "黄金 ETF"}
     results = []
-    for code, name in assets.items():
-        df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
-        if not df.empty and len(df) >= 26:
-            curr = df['收盘'].iloc[-1]
-            prev = df['收盘'].iloc[-26]
-            roc = ((curr / prev) - 1) * 100
-            results.append({"name": name, "curr": curr, "roc": roc})
+    try:
+        # 新浪分类快照接口，IP封锁概率极低
+        snapshot = ak.fund_etf_category_sina(symbol="ETF基金")
+        for code, name in assets.items():
+            full_code = f"sh{code}" if code.startswith('5') else f"sz{code}"
+            match = snapshot[snapshot['代码'] == full_code]
+            if not match.empty:
+                curr = float(match['最新价'].iloc[0])
+                change = float(match['涨跌额'].iloc[0])
+                roc = (change / (curr - change)) * 100 if curr != change else 0
+                results.append({"name": name, "curr": curr, "roc": roc})
+    except:
+        # 彻底失效时返回 0 防止渲染报错
+        results = [{"name": v, "curr": 0.0, "roc": 0.0} for v in assets.values()]
     return results
 
-# 2. 修改渲染函数
 def render_mainstream_monitor():
-    data = get_monitor_data() # 这里会触发缓存机制
+    data = get_monitor_data()
     cols = st.columns(4)
     for i, item in enumerate(data):
         cols[i].metric(label=item["name"], value=f"{item['curr']:.3f}", delta=f"{item['roc']:.2f}%")
 
+# =============================================================================
+# 3. 辅助计算逻辑
+# =============================================================================
 
 def get_nearest_price_info(target_date, df):
-    """
-    ターゲット日に最も近い取引日の情報を検索する
-    戻り値: (実際の取引日, 終値, 差分日数の説明)
-    """
     if df is None or df.empty:
         return None, None, ""
-        
-    # 時間差の絶対値が最小のインデックスを検索
     nearest_idx = (df['日期'] - target_date).abs().idxmin()
     actual_date = df.loc[nearest_idx, '日期']
     price = df.loc[nearest_idx, '收盘']
-    
     diff_days = (actual_date - target_date).days
-    
-    # 差分日数に基づいたラベル付け
     note = "当日"
     if diff_days > 0: note = f"延后{diff_days}天"
     elif diff_days < 0: note = f"提前{abs(diff_days)}天"
-    
     return actual_date, price, note
-
-# --- 日付ルールの計算ロジック (Date Rule Calculations) ---
 
 def get_futures_delivery(year, month):
     """先物交割日：第3金曜日"""
@@ -113,78 +123,61 @@ def get_option_delivery(year, month):
     return datetime.datetime(year, month, wednesdays[3]) if len(wednesdays) >= 4 else None
 
 def get_month_end(year, month):
-    """月末の最終日"""
     _, last_day = calendar.monthrange(year, month)
     return datetime.datetime(year, month, last_day)
 
 def get_mid_month(year, month):
-    """月中の15日"""
     return datetime.datetime(year, month, 15)
 
 # =============================================================================
-# メインUIレンダリングロジック (Main UI Rendering Logic)
+# 4. メインUI渲染逻辑
 # =============================================================================
 
 def render_cn_ui():
-    """
-    中国市場（A株）向けのメインUI。UI上の表記はすべて中国語を維持する。
-    """
     st.markdown("#### 🚀 主流今日监测 (ROC 25D)")
-    #render_mainstream_monitor()
-    # 1. 在最上方创建一个占位符
     monitor_placeholder = st.empty()
-    
-    # 2. 占位符先显示一个“加载中”的状态，避免顶部空出一块很奇怪
     with monitor_placeholder.container():
-        st.caption("正在实时获取市场动量数据... ⏳")
+        render_mainstream_monitor()
 
     st.markdown("### 📈 A股量化分析工具箱")
+    tab1, tab2, tab3, tab4 = st.tabs(["💼 模拟交易", "🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)", "🏆 排行榜"])
 
-    # タブによる機能モジュールの分離
-    #tab1, tab2, tab3, tab4 = st.tabs(["🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)", "🏆 排行榜", "💼 模拟交易"])
-    tab1, tab2, tab3, tab4 = st.tabs(["💼 模拟交易", "🔍 基础查询 (特定日期股价)","📊 策略回测 (波段 vs 长持)", "🏆 排行榜"])
     # ----------------------------------------------------------------
-    # 機能1：基礎照会 (Original Functionality)
+    # Tab 1: 模拟交易
     # ----------------------------------------------------------------
     with tab1:
         render_trade_ui()
 
+    # ----------------------------------------------------------------
+    # Tab 2: 基础查询
+    # ----------------------------------------------------------------
     with tab2:
         col1_input, col1_result = st.columns([1, 3], gap="large")
-        
         with col1_input:
             with st.container(border=True):
                 st.caption("查询设置")
                 t1_code = st.text_input("股票代码", value="600519", key="t1_code")
                 cur_year = datetime.datetime.now().year
                 t1_year = st.number_input("年份", min_value=2000, max_value=cur_year, value=cur_year, key="t1_year")
-                
-                t1_mode_sel = st.radio(
-                    "日期模式",
-                    ("A: 月中(15日) & 月底", "B: 期货(第3周五) & 期权(第4周三)"),
-                    key="t1_mode"
-                )
+                t1_mode_sel = st.radio("日期模式", ("A: 月中(15日) & 月底", "B: 期货(第3周五) & 期权(第4周三)"), key="t1_mode")
                 t1_run = st.button("查询股价", type="primary", use_container_width=True, key="t1_btn")
 
         with col1_result:
             if t1_run and t1_code:
-                with st.spinner('正在查询...'):
+                with st.spinner('正在获取数据...'):
                     df = get_stock_data(t1_code, f"{t1_year}0101", f"{t1_year}1231")
                     if df is not None:
                         target_list = []
                         mode = "A" if "A:" in t1_mode_sel else "B"
-                        
                         for m in range(1, 13):
                             today = datetime.datetime.now()
                             dates_to_check = []
-                            
                             if mode == "A":
                                 dates_to_check = [("月中", get_mid_month(t1_year, m)), ("月底", get_month_end(t1_year, m))]
                             else:
                                 f_day, o_day = get_futures_delivery(t1_year, m), get_option_delivery(t1_year, m)
                                 if f_day: dates_to_check.append(("期货交割日", f_day))
                                 if o_day: dates_to_check.append(("期权交割日", o_day))
-                            
                             for type_name, dt in dates_to_check:
                                 if dt <= today:
                                     act_date, price, note = get_nearest_price_info(dt, df)
@@ -193,28 +186,24 @@ def render_cn_ui():
                                             "月份": f"{dt.strftime('%m')}月", "类型": type_name, "目标日期": dt.strftime("%Y-%m-%d"),
                                             "实际交易日": act_date.strftime("%Y-%m-%d"), "收盘价": f"{price:.2f}", "说明": note
                                         })
-                        
                         if target_list:
                             res_df = pd.DataFrame(target_list)
                             st.dataframe(res_df, use_container_width=True)
-                            csv = res_df.to_csv(index=False).encode('utf-8-sig')
-                            st.download_button("📥 导出CSV", csv, f"{t1_code}_{t1_year}_基础查询.csv", "text/csv")
-                        else:
-                            st.info("没有符合日期的历史数据。")
-                    else:
-                        st.error("数据获取失败，请检查代码。")
+                            st.download_button("📥 导出CSV", res_df.to_csv(index=False).encode('utf-8-sig'), f"{t1_code}_股价.csv", "text/csv")
+                        else: st.info("没有符合日期的历史数据。")
+                    else: st.error("数据获取失败，请尝试更换代码或稍后再试。")
 
     # ----------------------------------------------------------------
-    # 機能2：策略バックテスト (Strict Monthly Validation)
+    # Tab 3: 策略回测
     # ----------------------------------------------------------------
     with tab3:
         col2_input, col2_result = st.columns([1, 3], gap="large")
-        
         with col2_input:
             with st.container(border=True):
                 st.caption("回测参数")
                 t2_code = st.text_input("股票代码", value="600519", key="t2_code")
-                t2_year = st.number_input("回测年份", min_value=2010, max_value=cur_year, value=cur_year-1, key="t2_year")
+                cur_y = datetime.datetime.now().year
+                t2_year = st.number_input("回测年份", min_value=2010, max_value=cur_y, value=cur_y-1, key="t2_year")
                 st.divider()
                 buy_rule = st.selectbox("🔵 买入点", ["本月期货交割日(第3周五)", "本月期权交割日(第4周三)", "本月最后交易日"], key="buy_rule")
                 sell_rule = st.selectbox("🔴 卖出点", ["下月第1个交易日", "下月15日(或最近交易日)"], key="sell_rule")
@@ -222,17 +211,14 @@ def render_cn_ui():
 
         with col2_result:
             if t2_run and t2_code:
-                with st.spinner('正在计算跨年收益...'):
-                    # 決済期間をまたぐため、翌年3月までのデータを取得
+                with st.spinner('正在计算策略收益...'):
                     df = get_stock_data(t2_code, f"{t2_year}0101", f"{t2_year+1}0301")
                     if df is not None:
                         trades = []
                         df['Year'] = df['日期'].dt.year
                         df['Month'] = df['日期'].dt.month
-                        
                         for m in range(1, 13):
                             b_date, b_price, s_date, s_price = None, None, None, None
-                            # 1. 【買入】日の確定 (対象月内に厳格限定)
                             curr_month_df = df[(df['Year'] == t2_year) & (df['Month'] == m)]
                             if not curr_month_df.empty:
                                 if "最后交易日" in buy_rule:
@@ -243,8 +229,6 @@ def render_cn_ui():
                                     if target_buy:
                                         nearest_idx = (curr_month_df['日期'] - target_buy).abs().idxmin()
                                         b_date, b_price = curr_month_df.loc[nearest_idx, '日期'], curr_month_df.loc[nearest_idx, '收盘']
-                            
-                            # 2. 【売出】日の確定 (翌月内に厳格限定)
                             if b_date: 
                                 n_y, n_m = (t2_year, m + 1) if m < 12 else (t2_year + 1, 1)
                                 next_month_df = df[(df['Year'] == n_y) & (df['Month'] == n_m)]
@@ -256,28 +240,21 @@ def render_cn_ui():
                                         target_sell = datetime.datetime(n_y, n_m, 15)
                                         nearest_idx = (next_month_df['日期'] - target_sell).abs().idxmin()
                                         s_date, s_price = next_month_df.loc[nearest_idx, '日期'], next_month_df.loc[nearest_idx, '收盘']
-                                
-                                # 3. トレードの記録
                                 if s_date and s_price and s_date > b_date:
-                                    trades.append({
-                                        "月份": f"{m}月", "买入日期": b_date.strftime("%Y-%m-%d"), "买入价": b_price,
-                                        "卖出日期": s_date.strftime("%Y-%m-%d"), "卖出价": s_price, "收益": s_price - b_price
-                                    })
-                        
+                                    trades.append({"月份": f"{m}月", "买入日期": b_date.strftime("%Y-%m-%d"), "买入价": b_price, "卖出日期": s_date.strftime("%Y-%m-%d"), "卖出价": s_price, "收益": s_price - b_price})
                         if trades:
                             t_df = pd.DataFrame(trades)
                             first_buy, last_sell, total_profit = t_df.iloc[0]['买入价'], t_df.iloc[-1]['卖出价'], t_df['收益'].sum()
-                            st.success(f"回测完成：{t2_code} ({t2_year})")
+                            st.success(f"回测完成：{t2_code}")
                             k1, k2, k3 = st.columns(3)
-                            k1.metric("初始投入", f"{first_buy:.2f}")
-                            k2.metric("策略收益率 (波段)", f"{(total_profit/first_buy)*100:.2f}%", delta=f"{total_profit:.2f}元")
-                            k3.metric("长持收益率 (死拿)", f"{(last_sell/first_buy-1)*100:.2f}%", delta=f"{last_sell-first_buy:.2f}元")
+                            k1.metric("初始买入价", f"{first_buy:.2f}")
+                            k2.metric("波段策略收益率", f"{(total_profit/first_buy)*100:.2f}%", delta=f"{total_profit:.2f}")
+                            k3.metric("年度持有收益率", f"{(last_sell/first_buy-1)*100:.2f}%", delta=f"{last_sell-first_buy:.2f}")
                             st.dataframe(t_df, use_container_width=True, hide_index=True)
-                        else:
-                            st.warning(f"该年份 ({t2_year}) 数据不足。")
+                        else: st.warning("该年份数据不足以回测。")
 
     # ----------------------------------------------------------------
-    # 功能3：ランキング (CSV Reader)
+    # Tab 4: 排行榜
     # ----------------------------------------------------------------
     with tab4:
         st.info("💡 说明：此页面仅展示本地已生成的扫描文件。")
@@ -290,170 +267,90 @@ def render_cn_ui():
             if os.path.exists(target_file):
                 try:
                     df_rank = pd.read_csv(target_file)
-                    st.success(f"✅ 成功读取文件，共包含 {len(df_rank)} 只股票数据。")
-                    st.dataframe(df_rank.head(10), use_container_width=True)
-                except Exception as e:
-                    st.error(f"文件读取出错: {e}")
-            else:
-                st.warning(f"⚠️ 未找到文件 `{target_file}`。")
+                    st.success(f"✅ 成功读取 {len(df_rank)} 只股票数据。")
+                    st.dataframe(df_rank.head(15), use_container_width=True)
+                except Exception as e: st.error(f"读取出错: {e}")
+            else: st.warning(f"⚠️ 未找到文件 `{target_file}`。")
 
-
-
-
-    
-    with monitor_placeholder.container():
-        # 这里放置你的标题和 render_mainstream_monitor 逻辑
-        render_mainstream_monitor()
+# =============================================================================
+# 5. 模拟交易界面逻辑 (由 Tab 1 调用)
+# =============================================================================
 
 def render_trade_ui():
-    # 使用 session_state 记录当前登录状态
     if "current_user" not in st.session_state:
         st.session_state.current_user = None
-
     all_users = load_all_users()
 
-    # --- 1. 登录/注册界面 ---
     if st.session_state.current_user is None:
         st.markdown("#### 👤 登录量化账户")
         login_name = st.text_input("请输入您的昵称", placeholder="例如: Zifan_Quant")
         if st.button("进入账户", type="primary"):
             if login_name:
-                if login_name in all_users:
-                    st.success(f"欢迎回来，{login_name}！已继承您的账户余额。")
-                else:
+                if login_name not in all_users:
                     all_users[login_name] = get_default_profile(login_name)
                     save_all_users(all_users)
-                    st.info(f"已为您创建新账户：{login_name}，初始资金 ¥100,000.00")
-                
                 st.session_state.current_user = login_name
                 st.rerun()
-            else:
-                st.warning("昵称不能为空")
-        return # 登录前不显示后续交易内容
+        return
 
-    # --- 2. 交易看板 (已登录) ---
     curr_name = st.session_state.current_user
     user = all_users[curr_name]
-
     user = trade.update_asset_log(user) 
     all_users[curr_name] = user
     save_all_users(all_users)
 
-# 1. 重新定义四列布局 [头像, 昵称余额, 资产曲线, 退出按钮]
-    # 比例建议：0.6 (头像) : 2 (信息) : 4 (图表) : 1 (退出)
+    # 重新定义四列布局 [头像, 信息, 曲线, 退出]
     col_p1, col_p2, col_p3, col_p4 = st.columns([0.6, 2, 4, 1], vertical_alignment="center")
-
-    with col_p1:
-        st.markdown(f"<h1 style='text-align: center; margin:0;'>{user['avatar']}</h1>", unsafe_allow_html=True)
-
+    with col_p1: st.markdown(f"<h1 style='text-align: center; margin:0;'>{user['avatar']}</h1>", unsafe_allow_html=True)
     with col_p2:
         st.markdown(f"**{user['nickname']}**", unsafe_allow_html=True)
         st.write(f"💰 ¥{user['balance']:,.2f}")
-
     with col_p3:
         if user.get('asset_log') and len(user['asset_log']) > 1:
             df_log = pd.DataFrame(user['asset_log'])
-            
-            # --- 1. 修复报错：color 必须是列表 ---
             chart_color = [user.get('color', '#FF4B4B')]
-            
-            # --- 2. 进阶：使用 Altair 实现真正的“金融自适应” ---
-            # 原生 st.area_chart 无法关闭“包含0”，导致波动看不见。
-            # 我们用 Streamlit 内置的 altair 库来画，效果秒杀原生。
-            import altair as alt
-            
             chart = alt.Chart(df_log).mark_area(
                 line={'color': chart_color[0]},
-                color=alt.Gradient(
-                    gradient='linear',
-                    stops=[alt.GradientStop(color=chart_color[0], offset=1),
-                           alt.GradientStop(color='white', offset=0)],
-                    x1=1, x2=1, y1=1, y2=0
-                )
+                color=alt.Gradient(gradient='linear', stops=[
+                    alt.GradientStop(color=chart_color[0], offset=1),
+                    alt.GradientStop(color='white', offset=0)], x1=1, x2=1, y1=1, y2=0)
             ).encode(
                 x=alt.X('time:N', axis=alt.Axis(labels=False, ticks=False, title=None)),
-                y=alt.Y('total:Q', scale=alt.Scale(zero=False), title=None), # zero=False 是自适应的关键
+                y=alt.Y('total:Q', scale=alt.Scale(zero=False), title=None),
                 tooltip=['time', 'total']
             ).properties(height=100)
-
             st.altair_chart(chart, use_container_width=True)
-            
-        else:
-            st.caption("📈 待交易数据入场...")
-            st.progress(0.1)
-
+        else: st.progress(0.1)
     with col_p4:
         if st.button("退出", use_container_width=True, key="logout_btn"):
             st.session_state.current_user = None
             st.rerun()
     st.divider()
 
-# --- B. 交易操作 (保持原有代码) ---
-# --- 3. 交易操作与持仓 ---
+    # 交易区
     c1, c2, c3 = st.columns(3)
     t_code = c1.text_input("标的代码", value="510300")
     t_qty = c2.number_input("交易数量", min_value=100, step=100)
-    
     op_c1, op_c2 = c3.columns(2)
-    st.write(" ") # 占位
-    
-    if op_c1.button("买入", type="primary", width="stretch"):
-        # 1. 创建状态容器
-        with st.status("正在撮合交易...", expanded=True) as status:
-            st.write("📡 正在连接行情接口...")
-            # 这里调用你的接口
-            success, msg, updated_user = trade.process_buy(user, t_code, t_qty)
-            
+    if op_c1.button("买入", type="primary", use_container_width=True):
+        with st.status("正在撮合交易...") as status:
+            success, msg, u = trade.process_buy(user, t_code, t_qty)
             if success:
-                st.write("💰 正在进行资金清算...")
-                updated_user = trade.update_asset_log(updated_user) 
-                all_users[curr_name] = updated_user
-                save_all_users(all_users)
-                st.write("📝 正在同步本地账本...")
-                status.update(label="✅ 交易已撮合成功", state="complete", expanded=False)
-                st.toast(msg) # 小弹窗提示
-                st.rerun()
-            else:
-                status.update(label="❌ 交易失败", state="error", expanded=True)
-                st.error(msg)
-
-    if op_c2.button("卖出", type="primary", width="stretch"):
-        # 1. 创建状态容器
-        with st.status("正在撮合交易...", expanded=True) as status:
-            st.write("📡 正在连接行情接口...")
-            # 这里调用你的接口
-            success, msg, updated_user = trade.process_sell(user, t_code, t_qty)
-            
+                all_users[curr_name] = trade.update_asset_log(u)
+                save_all_users(all_users); status.update(label="✅ 成功", state="complete"); st.rerun()
+            else: status.update(label="❌ 失败", state="error"); st.error(msg)
+    if op_c2.button("卖出", type="primary", use_container_width=True):
+        with st.status("正在撮合交易...") as status:
+            success, msg, u = trade.process_sell(user, t_code, t_qty)
             if success:
-                st.write("💰 正在进行资金清算...")
-                updated_user = trade.update_asset_log(updated_user) 
-                all_users[curr_name] = updated_user
-                save_all_users(all_users)
-                st.write("📝 正在同步本地账本...")
-                status.update(label="✅ 交易已撮合成功", state="complete", expanded=False)
-                st.toast(msg) # 小弹窗提示
-                st.rerun()
-            else:
-                status.update(label="❌ 交易失败", state="error", expanded=True)
-                st.error(msg)
+                all_users[curr_name] = trade.update_asset_log(u)
+                save_all_users(all_users); status.update(label="✅ 成功", state="complete"); st.rerun()
+            else: status.update(label="❌ 失败", state="error"); st.error(msg)
 
-    # 显示持仓表
     st.subheader("📦 当前持仓明细")
     if user['holdings']:
-        # 使用 st.dataframe 效果比 st.table 更专业，支持排序
-        st.dataframe(
-            pd.DataFrame([{"代码": k, "数量": v} for k, v in user['holdings'].items()]),
-            width="stretch",
-            hide_index=True
-        )
-    else:
-        st.caption("暂无持仓")
-    
-    # --- C. 交易历史明细 ---
-    with st.expander("🕒 查看交易历史记录", expanded=False):
-        if user['history']:
-            # 倒序显示，最新的在上面
-            history_df = pd.DataFrame(user['history']).iloc[::-1]
-            st.dataframe(history_df, use_container_width=True, hide_index=True)
-        else:
-            st.write("暂无成交记录")
+        st.dataframe(pd.DataFrame([{"代码": k, "数量": v} for k, v in user['holdings'].items()]), use_container_width=True, hide_index=True)
+    else: st.caption("暂无持仓")
+    with st.expander("🕒 查看交易历史记录"):
+        if user['history']: st.dataframe(pd.DataFrame(user['history']).iloc[::-1], use_container_width=True, hide_index=True)
+        else: st.write("暂无成交记录")
