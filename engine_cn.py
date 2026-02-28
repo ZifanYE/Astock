@@ -67,32 +67,129 @@ def get_stock_data(symbol, start_date, end_date):
             return None
     return None
 
-@st.cache_data(ttl=600)
+import pandas as pd
+import datetime
+import os
+import time
+import random
+import akshare as ak
+import altair as alt
+
+@st.cache_data(ttl=3600)
 def get_monitor_data():
-    """主流监控。放弃 fund_etf_hist_em (EM)，改用分类快照 (Sina)"""
-    assets = {"510300": "沪深300 ETF", "159949": "创业板50 ETF", "563300": "中证2000 ETF", "518880": "黄金 ETF"}
+    """全家共享的‘懒加载’函数：数据存在 data/ 文件夹，缺几天补几天"""
+    assets = {"510300": "hs300_etf", "159949": "cyb50_etf", "563300": "zz2000_etf", "518880": "gold_etf"}
+    display_names = {"510300": "沪深300 ETF", "159949": "创业板50 ETF", "563300": "中证2000 ETF", "518880": "黄金 ETF"}
+    
+    # 确保 data 文件夹存在
+    if not os.path.exists("data"):
+        os.makedirs("data")
+        
+    today = datetime.datetime.now().date()
+    current_hour = datetime.datetime.now().hour
     results = []
-    try:
-        # 新浪分类快照接口，IP封锁概率极低
-        snapshot = ak.fund_etf_category_sina(symbol="ETF基金")
-        for code, name in assets.items():
-            full_code = f"sh{code}" if code.startswith('5') else f"sz{code}"
-            match = snapshot[snapshot['代码'] == full_code]
-            if not match.empty:
-                curr = float(match['最新价'].iloc[0])
-                change = float(match['涨跌额'].iloc[0])
-                roc = (change / (curr - change)) * 100 if curr != change else 0
-                results.append({"name": name, "curr": curr, "roc": roc})
-    except:
-        # 彻底失效时返回 0 防止渲染报错
-        results = [{"name": v, "curr": 0.0, "roc": 0.0} for v in assets.values()]
+
+    for code, file_name in assets.items():
+        csv_path = f"data/{file_name}.csv"
+        df = pd.DataFrame()
+        need_update = False
+        
+        # 1. 检查本地 CSV 状态
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path)
+                df['date'] = pd.to_datetime(df['date'])
+                last_date = df['date'].max().date()
+                # 如果最后记录早于今天，且已收盘(16点后)，则触发补课
+                if last_date < today and current_hour >= 16:
+                    need_update = True
+            except:
+                need_update = True # 文件损坏则重爬
+        else:
+            need_update = True # 首次运行，创建文件
+
+        # 2. 执行“补课”爬虫 (仅在必要时联网)
+        if need_update:
+            try:
+                full_code = f"sh{code}" if code.startswith('5') else f"sz{code}"
+                # 使用最稳的新浪源补齐历史
+                new_data = ak.fund_etf_hist_sina(symbol=full_code)
+                if new_data is not None and not new_data.empty:
+                    new_data['date'] = pd.to_datetime(new_data['date'])
+                    # 合并、去重、排序
+                    df = pd.concat([df, new_data]).drop_duplicates(subset=['date']).sort_values('date')
+                    df.to_csv(csv_path, index=False)
+                # 关键防封：每爬一个品种随机歇 2 秒
+                time.sleep(random.uniform(1.5, 2.5))
+            except Exception as e:
+                st.sidebar.error(f"数据同步失败({code}): {e}")
+
+        # 3. 提取展示数据
+        if not df.empty:
+            df = df.sort_values('date')
+            
+            # --- 【核心修改：计算 ROC25 曲线】 ---
+            # pct_change(25) 表示当前值相对于25行前的值的变化率
+            df['roc25'] = df['close'].pct_change(25) * 100 
+            
+            curr_price = float(df['close'].iloc[-1])
+            # 最新的 ROC25 数字（用于 metric 显示）
+            curr_roc25 = float(df['roc25'].iloc[-1]) if not pd.isna(df['roc25'].iloc[-1]) else 0.0
+            
+            df['name'] = display_names[code]
+            results.append({
+                "name": display_names[code],
+                "curr": curr_price,
+                "roc25_val": curr_roc25, # 传出最新的动量值
+                "full_df": df[['date', 'roc25', 'name']] # 传出包含 ROC25 的历史
+            })
+
     return results
 
+
 def render_mainstream_monitor():
-    data = get_monitor_data()
+    raw_data = get_monitor_data()
+    if not raw_data: return
+
+    # --- 新增/修改：定义 ETF 名称与颜色的映射关系 ---
+    # 确保这里的名称与 get_monitor_data 传出的 display_names 一致
+    domain_names = ["沪深300 ETF", "创业板50 ETF", "中证2000 ETF", "黄金 ETF"]
+    # 对应颜色：蓝色(沪深)、绿色(创业)、红色(中证)、金色(黄金)
+    range_colors = ["#1E90FF", "#32CD32", "#FF4500", "#FFD700"] 
+
     cols = st.columns(4)
-    for i, item in enumerate(data):
-        cols[i].metric(label=item["name"], value=f"{item['curr']:.3f}", delta=f"{item['roc']:.2f}%")
+    plot_list = []
+    days_option = st.select_slider("📅 选择趋势跨度", options=[20, 50, 100, 250, "全部"], value=50)
+    for i, item in enumerate(raw_data):
+        cols[i].metric(label=item["name"], value=f"{item['curr']:.3f}", delta=f"{item['roc25_val']:.2f}%")
+        
+        df_p = item["full_df"].tail(int(days_option)) if days_option != "全部" else item["full_df"]
+        plot_list.append(df_p)
+
+    if plot_list:
+        combined_df = pd.concat(plot_list).dropna() 
+        st.markdown("---")
+        
+        chart = alt.Chart(combined_df).mark_line().encode(
+            x=alt.X('date:T', title='日期', axis=alt.Axis(format='%Y-%m-%d', labelAngle=-45)),
+            y=alt.Y('roc25:Q', title='25日动量 (ROC %)', scale=alt.Scale(zero=True)), 
+            
+            # --- 核心修改：在 color 中加入 scale 参数 ---
+            color=alt.Color('name:N', 
+                title='资产', 
+                legend=alt.Legend(orient='top'),
+                # 新加入 scale 属性，手动绑定名称与颜色
+                scale=alt.Scale(domain=domain_names, range=range_colors)
+            ),
+            
+            tooltip=[
+                alt.Tooltip('date:T', title='日期', format='%Y-%m-%d'),
+                alt.Tooltip('name:N', title='资产'),
+                alt.Tooltip('roc25:Q', title='ROC25', format='.2f')
+            ]
+        ).properties(height=400, title="🚀 四大 ETF 25日动量对比图").interactive()
+        
+        st.altair_chart(chart, use_container_width=True)
 
 # =============================================================================
 # 3. 辅助计算逻辑
