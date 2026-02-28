@@ -67,13 +67,9 @@ def get_stock_data(symbol, start_date, end_date):
             return None
     return None
 
-import pandas as pd
-import datetime
-import os
-import time
+
 import random
-import akshare as ak
-import altair as alt
+
 
 @st.cache_data(ttl=3600)
 def get_monitor_data():
@@ -148,6 +144,17 @@ def get_monitor_data():
 
 
 def render_mainstream_monitor():
+    if st.button("🔄"):
+        # 第一步：清除所有被 @st.cache_data 装饰的函数缓存
+        st.cache_data.clear()
+        # 第二步：用内置的转圈圈动画提示正在更新
+        with st.spinner("正在从服务器获取最新行情并更新本地 CSV..."):
+            # 重新调用数据获取函数，此时由于缓存已清，它会触发“补课”爬虫
+            get_monitor_data()
+        st.success("同步完成！")
+        # 强制页面刷新以显示新数据
+        st.rerun()
+
     raw_data = get_monitor_data()
     if not raw_data: return
 
