@@ -81,8 +81,10 @@ def get_monitor_data():
     if not os.path.exists("data"):
         os.makedirs("data")
         
-    today = datetime.datetime.now().date()
-    current_hour = datetime.datetime.now().hour
+    # 统一使用北京时间判定，避免云端服务器时区坑
+    now_bj = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+    today = now_bj.date()
+    current_hour = now_bj.hour
     results = []
 
     for code, file_name in assets.items():
@@ -94,69 +96,81 @@ def get_monitor_data():
         if os.path.exists(csv_path):
             try:
                 df = pd.read_csv(csv_path)
-                df['date'] = pd.to_datetime(df['date'])
-                last_date = df['date'].max().date()
-                # 如果最后记录早于今天，且已收盘(16点后)，则触发补课
-                if last_date < today and current_hour >= 16:
+                df['date'] = pd.to_datetime(df['date']).dt.date # 统一为 date 类型
+                last_date = df['date'].max()
+                
+                # 逻辑优化：
+                # A: 如果最后日期落后今天超过 1 天（如周一查上周五），直接补课
+                # B: 如果最后日期是昨天，且今天已经收盘（16点后），触发补课
+                if (today - last_date).days > 1:
+                    need_update = True
+                elif last_date < today and current_hour >= 16:
                     need_update = True
             except:
-                need_update = True # 文件损坏则重爬
+                need_update = True 
         else:
-            need_update = True # 首次运行，创建文件
+            need_update = True 
 
-        # 2. 执行“补课”爬虫 (仅在必要时联网)
+        # 2. 执行“补课”爬虫
         if need_update:
             try:
                 full_code = f"sh{code}" if code.startswith('5') else f"sz{code}"
-                # 使用最稳的新浪源补齐历史
                 new_data = ak.fund_etf_hist_sina(symbol=full_code)
                 if new_data is not None and not new_data.empty:
-                    new_data['date'] = pd.to_datetime(new_data['date'])
+                    new_data['date'] = pd.to_datetime(new_data['date']).dt.date
                     # 合并、去重、排序
                     df = pd.concat([df, new_data]).drop_duplicates(subset=['date']).sort_values('date')
                     df.to_csv(csv_path, index=False)
-                # 关键防封：每爬一个品种随机歇 2 秒
                 time.sleep(random.uniform(1.5, 2.5))
             except Exception as e:
                 st.sidebar.error(f"数据同步失败({code}): {e}")
 
         # 3. 提取展示数据
         if not df.empty:
-            df = df.sort_values('date')
+            df = df.sort_values('date').reset_index(drop=True)
             
-            # --- 【核心修改：计算 ROC25 曲线】 ---
-            # pct_change(25) 表示当前值相对于25行前的值的变化率
+            # 计算 ROC25
             df['roc25'] = df['close'].pct_change(25) * 100 
             
             curr_price = float(df['close'].iloc[-1])
-            # 最新的 ROC25 数字（用于 metric 显示）
             curr_roc25 = float(df['roc25'].iloc[-1]) if not pd.isna(df['roc25'].iloc[-1]) else 0.0
             
-            df['name'] = display_names[code]
+            # 这里的 full_df 建议转换回 datetime 方便绘图组件识别
+            plot_df = df[['date', 'roc25']].copy()
+            plot_df['name'] = display_names[code]
+            
             results.append({
                 "name": display_names[code],
                 "curr": curr_price,
-                "roc25_val": curr_roc25, # 传出最新的动量值
-                "full_df": df[['date', 'roc25', 'name']] # 传出包含 ROC25 的历史
+                "roc25_val": curr_roc25,
+                "full_df": plot_df
             })
 
     return results
 
-
 def render_mainstream_monitor():
-    if st.button("🔄"):
-        # 第一步：清除所有被 @st.cache_data 装饰的函数缓存
+    # --- 1. 数据同步按钮逻辑 ---
+    if st.sidebar.button("🔄 强制同步最新数据"):
+        # 第一步：清除所有 @st.cache_data 装饰的函数缓存
         st.cache_data.clear()
-        # 第二步：用内置的转圈圈动画提示正在更新
-        with st.spinner("正在从服务器获取最新行情并更新本地 CSV..."):
-            # 重新调用数据获取函数，此时由于缓存已清，它会触发“补课”爬虫
+        
+        # 第二步：显示加载动画并执行更新
+        with st.spinner("正在获取最新行情并更新本地 CSV..."):
+            # 由于缓存已清，此处调用会触发函数内部的 need_update 逻辑
             get_monitor_data()
-        st.success("同步完成！")
-        # 强制页面刷新以显示新数据
+            st.sidebar.success("同步完成！")
+        
+        # 第三步：立即刷新页面，使 get_monitor_data() 重新运行并读取更新后的 CSV
         st.rerun()
 
+    # --- 2. 正常获取数据 ---
+    # 无论是否点击按钮，页面加载时都会走这一步
     raw_data = get_monitor_data()
-    if not raw_data: return
+
+    # --- 3. 截断处理 ---
+    if not raw_data:
+        st.warning("尚未获取到数据，请点击上方按钮同步。")
+        st.stop() # 替代原来的 return，在 streamlit 中更安全
 
     # --- 新增/修改：定义 ETF 名称与颜色的映射关系 ---
     # 确保这里的名称与 get_monitor_data 传出的 display_names 一致
