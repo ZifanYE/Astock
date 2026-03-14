@@ -67,7 +67,6 @@ def get_stock_data(symbol, start_date, end_date):
             return None
     return None
 
-
 import random
 
 
