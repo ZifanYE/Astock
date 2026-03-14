@@ -47,24 +47,86 @@ def get_default_profile(nickname):
 
 @st.cache_data(ttl=3600)
 def get_stock_data(symbol, start_date, end_date):
-    """日次データ取得。EM接口被封时自动切换到Sina接口"""
+    """
+    稳定版行情获取函数
+    解决：
+    1. 日期变成1970
+    2. 数据不足无法回测
+    3. 东方财富IP封锁
+    """
+
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+
+    # 回测需要更长历史
+    start_buffer = (start - pd.Timedelta(days=120)).strftime("%Y%m%d")
+
+    df = None
+
+    # ------------------------------------------------
+    # 方案1：东方财富接口
+    # ------------------------------------------------
     try:
-        # 路径 A: 东方财富接口
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+        df = ak.stock_zh_a_hist(
+            symbol=symbol,
+            period="daily",
+            start_date=start_buffer,
+            end_date=end_date,
+            adjust="qfq"
+        )
+
         if df is not None and not df.empty:
-            df['日期'] = pd.to_datetime(df['日期'])
-            return df[['日期', '收盘']]
-    except:
-        try:
-            # 路径 B: 新浪源平替（封锁限制极少）
-            df = ak.stock_zh_a_daily(symbol=f"sh{symbol}" if symbol.startswith('6') else f"sz{symbol}", 
-                                    start_date=start_date, end_date=end_date)
-            if df is not None and not df.empty:
-                df = df.rename(columns={'close': '收盘'})
-                df['日期'] = pd.to_datetime(df.index)
-                return df[['日期', '收盘']]
-        except:
-            return None
+
+            df = df[['日期', '收盘']].copy()
+            df['日期'] = pd.to_datetime(df['日期'], errors="coerce")
+
+            df = df.dropna(subset=['日期'])
+            df = df[df['日期'] > pd.Timestamp("1990-01-01")]
+
+            df = df.sort_values('日期').reset_index(drop=True)
+
+            return df
+
+    except Exception as e:
+        print("EM接口失败:", e)
+
+    # ------------------------------------------------
+    # 方案2：新浪接口（稳定备用）
+    # ------------------------------------------------
+    try:
+
+        prefix = "sh" if symbol.startswith(("6","5")) else "sz"
+        full_symbol = prefix + symbol
+
+        df = ak.stock_zh_a_daily(symbol=full_symbol)
+
+        if df is not None and not df.empty:
+
+            df = df.reset_index()
+
+            df = df.rename(columns={
+                "date": "日期",
+                "close": "收盘"
+            })
+
+            df['日期'] = pd.to_datetime(df['日期'], errors="coerce")
+
+            df = df.dropna(subset=['日期'])
+
+            df = df[df['日期'] > pd.Timestamp("1990-01-01")]
+
+            df = df[['日期','收盘']]
+
+            df = df.sort_values('日期').reset_index(drop=True)
+
+            # 按用户请求区间截取
+            df = df[(df['日期'] >= start) & (df['日期'] <= end)]
+
+            return df
+
+    except Exception as e:
+        print("Sina接口失败:", e)
+
     return None
 
 import random
