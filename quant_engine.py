@@ -83,6 +83,13 @@ def render_rotation_strategy():
     if signal is None:
         st.error("轮动池品种在数据中均未匹配，请检查 engine_cn 的 display_names 配置。")
         return
+    
+        # ── 数据截至日期
+    try:
+        last_date = raw_data[0]["full_df"]["date"].iloc[-1]
+        st.caption(f"数据截至：{last_date}")
+    except Exception:
+        pass
 
     # ── 操作信号横幅 ──────────────────────────────────────────
     if signal["action"] == "BUY":
