@@ -1,8 +1,9 @@
-# app.py
+# app.py  python -m streamlit run app.py
 import streamlit as st
 from streamlit_javascript import st_javascript
 import engine_cn
 import engine_jp
+import quant_engine  # [新增] 引入量化模块
 import time
 
 # =============================================================================
@@ -24,6 +25,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# [新增] 初始化页面路由状态
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "home"
+
 # =============================================================================
 # 2. 言語検知ロジック (URLパラメータ > JavaScript検知)
 # =============================================================================
@@ -40,9 +45,6 @@ if "lang_mode" not in st.session_state:
     st.session_state.lang_mode = None
 
 # 言語判定ロジック：
-# 1. URLパラメータが存在すればそれを優先
-# 2. 次にJavaScriptの取得結果に基づいて判定
-# 3. 取得待ちの状態では初期値を設定しない（Race Condition対策）
 if st.session_state.lang_mode is None:
     if url_lang == "jp":
         st.session_state.lang_mode = "JP"
@@ -52,31 +54,39 @@ if st.session_state.lang_mode is None:
         else:
             st.session_state.lang_mode = "CN"
     else:
-        # 非同期処理の遅延中は判定を保留
         pass
 
 # =============================================================================
-# 3. 右上部の言語切り替えボタン (日/中 トグル)
+# 3. 右上部の言語切り替えボタン (日/中 トグル) & 量化跳转 [修改]
 # =============================================================================
-# タイトル行と同じ高さにボタンを配置するためのカラムレイアウト
-h_col1, h_col2 = st.columns([12, 1])
+# [修改] 调整列比例以容纳两个按钮 (从 [12, 1] 变为 [10, 1, 1])
+h_col1, h_col2, h_col3 = st.columns([10, 1, 1])
+
+# [新增] 量化页面跳转按钮
 with h_col2:
+    btn_label = "量化交易" if st.session_state.current_page == "home" else "返回行情"
+    if st.button(btn_label):
+        st.session_state.current_page = "quant" if st.session_state.current_page == "home" else "home"
+        st.rerun()
+
+# [修改] 原语言切换按钮移至 h_col3
+with h_col3:
     if st.button("日/中"):
-        # 未初期化状態でのクリックを考慮し、現在のステータスを反転させる
         current = st.session_state.lang_mode if st.session_state.lang_mode else "CN"
         st.session_state.lang_mode = "JP" if current == "CN" else "CN"
-        # 状態変更後に即時再レンダリングを実行
         st.rerun()
 
 # =============================================================================
-# 4. エンジンの実行とルーティング
+# 4. エンジンの実行とルーティング [修改]
 # =============================================================================
-# 最終的なフォールバック：検知が完了していない場合はデフォルト(CN)を使用
 final_mode = st.session_state.lang_mode if st.session_state.lang_mode else "CN"
 
-if final_mode == "JP":
-    # 日本市場向けエンジン (engine_jp.py) を実行
-    engine_jp.render_jp_ui()
+# [修改] 增加最外层的页面路由拦截
+if st.session_state.current_page == "quant":
+    quant_engine.render_rotation_strategy()  # [新增] 渲染量化页面
 else:
-    # 中国市場向けエンジン (engine_cn.py) を実行
-    engine_cn.render_cn_ui()
+    # 保持原有逻辑
+    if final_mode == "JP":
+        engine_jp.render_jp_ui()
+    else:
+        engine_cn.render_cn_ui()

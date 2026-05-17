@@ -135,8 +135,8 @@ import random
 @st.cache_data(ttl=3600)
 def get_monitor_data():
     """全家共享的‘懒加载’函数：数据存在 data/ 文件夹，缺几天补几天"""
-    assets = {"510300": "hs300_etf", "159949": "cyb50_etf", "563300": "zz2000_etf", "518880": "gold_etf"}
-    display_names = {"510300": "沪深300 ETF", "159949": "创业板50 ETF", "563300": "中证2000 ETF", "518880": "黄金 ETF"}
+    assets = {"510300": "hs300_etf", "159967": "czcz_etf", "563000": "zz2000_etf", "518880": "gold_etf", "513100": "nasdaq_etf"}
+    display_names = {"510300": "沪深300 ETF", "159967": "创成长 ETF", "563000": "中证2000 ETF", "518880": "黄金 ETF", "513100": "纳指 ETF"}
     
     # 确保 data 文件夹存在
     if not os.path.exists("data"):
@@ -190,20 +190,20 @@ def get_monitor_data():
         if not df.empty:
             df = df.sort_values('date').reset_index(drop=True)
             
-            # 计算 ROC25
-            df['roc25'] = df['close'].pct_change(25) * 100 
-            
+            # 计算 ROC20（N=20日涨幅，M无意义不计算）
+            df['roc20'] = df['close'].pct_change(20) * 100
+
             curr_price = float(df['close'].iloc[-1])
-            curr_roc25 = float(df['roc25'].iloc[-1]) if not pd.isna(df['roc25'].iloc[-1]) else 0.0
-            
+            curr_roc20 = float(df['roc20'].iloc[-1]) if not pd.isna(df['roc20'].iloc[-1]) else 0.0
+
             # 这里的 full_df 建议转换回 datetime 方便绘图组件识别
-            plot_df = df[['date', 'roc25']].copy()
+            plot_df = df[['date', 'close', 'roc20']].copy()
             plot_df['name'] = display_names[code]
-            
+
             results.append({
                 "name": display_names[code],
                 "curr": curr_price,
-                "roc25_val": curr_roc25,
+                "roc20_val": curr_roc20,
                 "full_df": plot_df
             })
 
@@ -235,42 +235,42 @@ def render_mainstream_monitor():
 
     # --- 新增/修改：定义 ETF 名称与颜色的映射关系 ---
     # 确保这里的名称与 get_monitor_data 传出的 display_names 一致
-    domain_names = ["沪深300 ETF", "创业板50 ETF", "中证2000 ETF", "黄金 ETF"]
-    # 对应颜色：蓝色(沪深)、绿色(创业)、红色(中证)、金色(黄金)
-    range_colors = ["#1E90FF", "#32CD32", "#FF4500", "#FFD700"] 
+    domain_names = ["沪深300 ETF", "创成长 ETF", "中证2000 ETF", "黄金 ETF", "纳指 ETF"]
+    # 对应颜色：蓝色(沪深)、绿色(创成长)、红色(中证)、金色(黄金)、橙色(纳指)
+    range_colors = ["#1E90FF", "#32CD32", "#FF4500", "#FFD700", "#FF8C00"]
 
-    cols = st.columns(4)
+    cols = st.columns(5)
     plot_list = []
     days_option = st.select_slider("📅 选择趋势跨度", options=[20, 50, 100, 250, "全部"], value=50)
     for i, item in enumerate(raw_data):
-        cols[i].metric(label=item["name"], value=f"{item['curr']:.3f}", delta=f"{item['roc25_val']:.2f}%")
-        
+        cols[i].metric(label=item["name"], value=f"{item['curr']:.3f}", delta=f"{item['roc20_val']:.2f}%")
+
         df_p = item["full_df"].tail(int(days_option)) if days_option != "全部" else item["full_df"]
         plot_list.append(df_p)
 
     if plot_list:
-        combined_df = pd.concat(plot_list).dropna() 
+        combined_df = pd.concat(plot_list).dropna()
         st.markdown("---")
-        
+
         chart = alt.Chart(combined_df).mark_line().encode(
             x=alt.X('date:T', title='日期', axis=alt.Axis(format='%Y-%m-%d', labelAngle=-45)),
-            y=alt.Y('roc25:Q', title='25日动量 (ROC %)', scale=alt.Scale(zero=True)), 
-            
+            y=alt.Y('roc20:Q', title='20日动量 (ROC %)', scale=alt.Scale(zero=True)),
+
             # --- 核心修改：在 color 中加入 scale 参数 ---
-            color=alt.Color('name:N', 
-                title='资产', 
+            color=alt.Color('name:N',
+                title='资产',
                 legend=alt.Legend(orient='top'),
                 # 新加入 scale 属性，手动绑定名称与颜色
                 scale=alt.Scale(domain=domain_names, range=range_colors)
             ),
-            
+
             tooltip=[
                 alt.Tooltip('date:T', title='日期', format='%Y-%m-%d'),
                 alt.Tooltip('name:N', title='资产'),
-                alt.Tooltip('roc25:Q', title='ROC25', format='.2f')
+                alt.Tooltip('roc20:Q', title='ROC20', format='.2f')
             ]
-        ).properties(height=400, title="🚀 四大 ETF 25日动量对比图").interactive()
-        
+        ).properties(height=400, title="🚀 五大 ETF 20日动量对比图").interactive()
+
         st.altair_chart(chart, use_container_width=True)
 
 # =============================================================================
