@@ -1,202 +1,130 @@
-# quant_engine.py
-"""
-五大品种 20日ROC 动量轮动策略
-────────────────────────────
-步骤一：每日收盘前比较五个品种的20日ROC，选出涨幅最大的品种
-步骤二：若最强品种ROC > 0 → 买入/持有；若ROC <= 0 → 全部空仓
-"""
-
 import streamlit as st
-import altair as alt
+import numpy as np
 import pandas as pd
-from engine_cn import get_monitor_data
+import time
 
-# 与 engine_cn.display_names 保持一致
-UNIVERSE = ["沪深300 ETF", "创成长 ETF", "中证2000 ETF", "黄金 ETF", "纳指 ETF"]
-
-# 对应颜色（与 engine_cn 的 range_colors 一致）
-COLOR_MAP = {
-    "沪深300 ETF": "#1E90FF",
-    "创成长 ETF":  "#32CD32",
-    "中证2000 ETF": "#FF4500",
-    "黄金 ETF":    "#FFD700",
-    "纳指 ETF":    "#FF8C00",
-}
-
-
-def get_rotation_signal(raw_data: list) -> dict:
+# ==========================================
+# 0. 核心算法：卡尔曼滤波 (预测与自动纠错)
+# ==========================================
+class KalmanFilterBot:
     """
-    从 get_monitor_data() 的返回值计算轮动信号。
-
-    返回：
-        {
-            "target":    str,    # 选中品种名（空仓时为 None）
-            "roc20":     float,  # 选中品种的20日ROC
-            "action":    str,    # "BUY" | "CASH"
-            "roc_table": list,   # [{"name", "curr", "roc20_val"}, ...]，按ROC降序
-        }
+    这是一个极简的卡尔曼滤波实现。
+    它的核心思想完全符合你的要求：根据上一期的预测误差，动态调整对下一期的预测。
     """
-    rows = []
-    for item in raw_data:
-        if item["name"] in UNIVERSE:
-            rows.append({
-                "name":     item["name"],
-                "curr":     item["curr"],
-                "roc20":    item["roc20_val"],
-            })
+    def __init__(self, process_variance=1e-5, estimated_measurement_variance=0.01):
+        self.posteri_estimate = 1.0 # 初始猜测值
+        self.posteri_error_estimate = 1.0 # 初始误差估计
+        self.Q = process_variance # 过程噪音方差 (系统的不确定性)
+        self.R = estimated_measurement_variance # 测量噪音方差
 
-    if not rows:
-        return None
+    def update(self, measurement):
+        # 1. 预测阶段 (Predict)
+        priori_estimate = self.posteri_estimate
+        priori_error_estimate = self.posteri_error_estimate + self.Q
 
-    # 按20日ROC降序排列
-    rows.sort(key=lambda x: x["roc20"], reverse=True)
-    best = rows[0]
+        # 2. 纠错阶段 (Update/Correct)
+        blending_factor = priori_error_estimate / (priori_error_estimate + self.R) # 卡尔曼增益
+        # 核心逻辑：当前估计 = 预测值 + 增益 * (实际值 - 预测值)[即误差]
+        self.posteri_estimate = priori_estimate + blending_factor * (measurement - priori_estimate)
+        self.posteri_error_estimate = (1 - blending_factor) * priori_error_estimate
 
-    if best["roc20"] > 0:
-        action = "BUY"
-    else:
-        action = "CASH"
+        return self.posteri_estimate
 
-    return {
-        "target":    best["name"] if action == "BUY" else None,
-        "roc20":     best["roc20"],
-        "action":    action,
-        "roc_table": rows,
-    }
+# ==========================================
+# 1. 状态初始化 (在全局最外层执行)
+# ==========================================
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "bots" not in st.session_state:
+    st.session_state.bots = [] # 存储活跃的机器人列表
 
+def render_quant_ui():
+    # ==========================================
+    # 2. 登录模块
+    # ==========================================
+    if not st.session_state.logged_in:
+        st.title("🔐 智能量化终端登录")
+        with st.form("login_form"):
+            user = st.text_input("用户名", placeholder="admin")
+            pwd = st.text_input("密码", type="password", placeholder="123456")
+            submitted = st.form_submit_button("登录")
+            if submitted:
+                if user == "admin" and pwd == "123456":
+                    st.session_state.logged_in = True
+                    st.success("登录成功！正在进入控制台...")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("用户名或密码错误！(测试账号: admin / 123456)")
+        return # 拦截未登录用户
 
-def render_rotation_strategy():
-    """
-    在 Streamlit 页面中渲染轮动策略信号面板。
-    在主 app 文件中调用：
-        from quant_engine import render_rotation_strategy
-        render_rotation_strategy()
-    """
-    st.subheader("🔄 五大品种 20日ROC 动量轮动策略")
-
-    raw_data = get_monitor_data()
-    if not raw_data:
-        st.warning("尚未获取到数据，请点击侧边栏的「强制同步」按钮。")
-        return
-
-    signal = get_rotation_signal(raw_data)
-    if signal is None:
-        st.error("轮动池品种在数据中均未匹配，请检查 engine_cn 的 display_names 配置。")
-        return
-    
-        # ── 数据截至日期
-    try:
-        last_date = raw_data[0]["full_df"]["date"].iloc[-1]
-        st.caption(f"数据截至：{last_date}")
-    except Exception:
-        pass
-
-    # ── 操作信号横幅 ──────────────────────────────────────────
-    if signal["action"] == "BUY":
-        st.success(
-            f"**【今日信号：买入 / 持有】** &nbsp;▶&nbsp; **{signal['target']}**"
-            f"　　20日ROC = **{signal['roc20']:+.2f}%**",
-            icon="✅",
-        )
-    else:
-        st.warning(
-            f"**【今日信号：空仓】** &nbsp;▶&nbsp; 最强品种20日ROC = **{signal['roc20']:+.2f}%** ≤ 0，清仓观望",
-            icon="⚠️",
-        )
-
+    # ==========================================
+    # 3. 主控制台模块 (已登录)
+    # ==========================================
+    st.title("🤖 Agentic Quant 机器人控制台")
     st.markdown("---")
 
-    # ── 各品种ROC指标卡（按ROC降序排列）──────────────────────
-    cols = st.columns(5)
-    for i, row in enumerate(signal["roc_table"]):
-        is_winner = (row["name"] == signal["target"])
-        label = ("🏆 " if is_winner else "") + row["name"]
-        cols[i].metric(
-            label=label,
-            value=f"{row['curr']:.3f}",
-            delta=f"{row['roc20']:+.2f}%",
-        )
+    col1, col2 = st.columns([1, 2])
 
-    st.markdown("---")
+    # --- 左侧：机器人创建面板 ---
+    with col1:
+        st.subheader("🛠️ 创建新机器人")
+        bot_name = st.text_input("机器人名称", placeholder="例如：Alpha-01")
+        target_asset = st.selectbox("监控标的", ["沪深300 (000300)", "纳指ETF (513100)", "黄金ETF (518880)"])
+        strategy = st.selectbox("驱动策略", [
+            "卡尔曼滤波 (误差自适应预测)", 
+            "LSTM深度学习 (需要GPU)", 
+            "20日动量轮动"
+        ])
+        
+        if st.button("🚀 部署上线"):
+            if bot_name:
+                new_bot = {
+                    "id": len(st.session_state.bots) + 1,
+                    "name": bot_name,
+                    "asset": target_asset,
+                    "strategy": strategy,
+                    "status": "运行中 🟢",
+                    # 为这个机器人实例化一个专属的预测引擎
+                    "engine": KalmanFilterBot() 
+                }
+                st.session_state.bots.append(new_bot)
+                st.success(f"{bot_name} 部署成功！")
+                st.rerun()
+            else:
+                st.warning("请填写机器人名称")
 
-    # ── 柱状图：五大品种20日ROC对比 ─────────────────────────
-    bar_df = pd.DataFrame(signal["roc_table"])
-    bar_df["正负"] = bar_df["roc20"].apply(lambda x: "正收益" if x > 0 else "负收益")
-    bar_df["是否选中"] = bar_df["name"] == signal["target"]
+        if st.button("🚪 退出登录"):
+            st.session_state.logged_in = False
+            st.rerun()
 
-    bar = (
-        alt.Chart(bar_df)
-        .mark_bar()
-        .encode(
-            x=alt.X("name:N", sort="-y", title=None,
-                    axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("roc20:Q", title="20日ROC (%)"),
-            color=alt.Color(
-                "正负:N",
-                scale=alt.Scale(
-                    domain=["正收益", "负收益"],
-                    range=["#26a69a", "#ef5350"],
-                ),
-                legend=alt.Legend(title=None),
-            ),
-            opacity=alt.condition(
-                alt.datum["是否选中"],
-                alt.value(1.0),
-                alt.value(0.55),
-            ),
-            tooltip=[
-                alt.Tooltip("name:N",  title="品种"),
-                alt.Tooltip("roc20:Q", title="20日ROC (%)", format="+.2f"),
-                alt.Tooltip("curr:Q",  title="最新价",      format=".3f"),
-            ],
-        )
-        .properties(height=300, title="📊 五大 ETF 20日ROC 对比（选中品种高亮）")
-        .interactive()
-    )
-    st.altair_chart(bar, use_container_width=True)
+    # --- 右侧：机器人运行状态与纠错面板 ---
+    with col2:
+        st.subheader("📈 在线机器人监控")
+        
+        if not st.session_state.bots:
+            st.info("当前没有运行中的机器人，请在左侧创建。")
+        else:
+            for bot in st.session_state.bots:
+                with st.expander(f"[{bot['status']}] {bot['name']} | 标的: {bot['asset']} | 策略: {bot['strategy']}", expanded=True):
+                    
+                    # 生成模拟的最新市场数据
+                    latest_actual_price = np.random.normal(1.0, 0.05) 
+                    
+                    # 调用机器人的算法进行“纠错与预测”
+                    predicted_price = bot["engine"].update(latest_actual_price)
+                    error_margin = abs((predicted_price - latest_actual_price) / latest_actual_price)
 
-    # ── 历史ROC走势图（复用 full_df 中已算好的 roc20 列）────
-    plot_list = []
-    for item in raw_data:
-        if item["name"] in UNIVERSE:
-            plot_list.append(item["full_df"])
-
-    if plot_list:
-        days_opt = st.select_slider(
-            "📅 历史走势跨度",
-            options=[20, 50, 100, 250, "全部"],
-            value=50,
-            key="quant_days_slider",
-        )
-        combined = pd.concat(
-            [d.tail(int(days_opt)) if days_opt != "全部" else d for d in plot_list]
-        ).dropna()
-
-        domain = list(COLOR_MAP.keys())
-        colors = list(COLOR_MAP.values())
-
-        line = (
-            alt.Chart(combined)
-            .mark_line()
-            .encode(
-                x=alt.X("date:T", title="日期",
-                         axis=alt.Axis(format="%Y-%m-%d", labelAngle=-45)),
-                y=alt.Y("roc20:Q", title="20日ROC (%)", scale=alt.Scale(zero=True)),
-                color=alt.Color(
-                    "name:N",
-                    title="资产",
-                    legend=alt.Legend(orient="top"),
-                    scale=alt.Scale(domain=domain, range=colors),
-                ),
-                tooltip=[
-                    alt.Tooltip("date:T",  title="日期",  format="%Y-%m-%d"),
-                    alt.Tooltip("name:N",  title="资产"),
-                    alt.Tooltip("roc20:Q", title="ROC20 (%)", format=".2f"),
-                ],
-            )
-            .properties(height=380, title="📈 五大 ETF 20日ROC 历史走势")
-            .interactive()
-        )
-        st.altair_chart(line, use_container_width=True)
-
-    st.caption("⚠️ 本策略仅供参考，不构成投资建议。每日收盘前参考信号操作。")
+                    # UI 展示
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("市场实际最新价", f"{latest_actual_price:.4f}")
+                    m2.metric("Bot 修正后预测价", f"{predicted_price:.4f}", delta=f"拟合追踪中", delta_color="normal")
+                    m3.metric("当前预测误差", f"{error_margin:.2%}", delta="自动纠偏生效" if error_margin < 0.05 else "误差偏大", delta_color="inverse")
+                    
+                    # 模拟交易决策
+                    if predicted_price > latest_actual_price * 1.01:
+                        st.write("📢 **Bot 决策指令:** 预测价格高于现价，执行 **[买入操作]**")
+                    elif predicted_price < latest_actual_price * 0.99:
+                        st.write("📢 **Bot 决策指令:** 预测价格低于现价，执行 **[卖出平仓]**")
+                    else:
+                        st.write("📢 **Bot 决策指令:** 预测价格与现价接近，执行 **[观望]**")

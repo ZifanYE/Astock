@@ -10,6 +10,7 @@ import time
 import altair as alt
 import trade_test as trade  # 请确保你的 trade_test.py 文件在同级目录
 
+UNIVERSE = ["沪深300 ETF", "创成长 ETF", "中证2000 ETF", "黄金 ETF", "纳指 ETF"]
 # =============================================================================
 # 1. 用户管理系统
 # =============================================================================
@@ -208,6 +209,45 @@ def get_monitor_data():
             })
 
     return results
+def get_rotation_signal(raw_data: list) -> dict:
+    """
+    从 get_monitor_data() 的返回值计算轮动信号。
+
+    返回：
+        {
+            "target":    str,    # 选中品种名（空仓时为 None）
+            "roc20":     float,  # 选中品种的20日ROC
+            "action":    str,    # "BUY" | "CASH"
+            "roc_table": list,   # [{"name", "curr", "roc20_val"}, ...]，按ROC降序
+        }
+    """
+    rows = []
+    for item in raw_data:
+        if item["name"] in UNIVERSE:
+            rows.append({
+                "name":     item["name"],
+                "curr":     item["curr"],
+                "roc20":    item["roc20_val"],
+            })
+
+    if not rows:
+        return None
+
+    # 按20日ROC降序排列
+    rows.sort(key=lambda x: x["roc20"], reverse=True)
+    best = rows[0]
+
+    if best["roc20"] > 0:
+        action = "BUY"
+    else:
+        action = "CASH"
+
+    return {
+        "target":    best["name"] if action == "BUY" else None,
+        "roc20":     best["roc20"],
+        "action":    action,
+        "roc_table": rows,
+    }
 
 def render_mainstream_monitor():
     # --- 1. 数据同步按钮逻辑 ---
@@ -232,6 +272,35 @@ def render_mainstream_monitor():
     if not raw_data:
         st.warning("尚未获取到数据，请点击上方按钮同步。")
         st.stop() # 替代原来的 return，在 streamlit 中更安全
+    #
+
+    signal = get_rotation_signal(raw_data)
+    if signal is None:
+        st.error("轮动池品种在数据中均未匹配，请检查 engine_cn 的 display_names 配置。")
+        return
+    
+        # ── 数据截至日期
+    try:
+        last_date = raw_data[0]["full_df"]["date"].iloc[-1]
+        st.caption(f"数据截至：{last_date}")
+    except Exception:
+        pass
+
+    # ── 操作信号横幅 ──────────────────────────────────────────
+    if signal["action"] == "BUY":
+        st.success(
+            f"**【今日信号：买入 / 持有】** &nbsp;▶&nbsp; **{signal['target']}**"
+            f"　　20日ROC = **{signal['roc20']:+.2f}%**",
+            icon="✅",
+        )
+    else:
+        st.warning(
+            f"**【今日信号：空仓】** &nbsp;▶&nbsp; 最强品种20日ROC = **{signal['roc20']:+.2f}%** ≤ 0，清仓观望",
+            icon="⚠️",
+        )
+
+    st.markdown("---")
+
 
     # --- 新增/修改：定义 ETF 名称与颜色的映射关系 ---
     # 确保这里的名称与 get_monitor_data 传出的 display_names 一致
@@ -313,7 +382,7 @@ def get_mid_month(year, month):
 # =============================================================================
 
 def render_cn_ui():
-    st.markdown("#### 🚀 主流今日监测 (ROC 25D)")
+    st.markdown("#### 🚀 主流今日监测 (ROC 20D)")
     monitor_placeholder = st.empty()
     with monitor_placeholder.container():
         render_mainstream_monitor()

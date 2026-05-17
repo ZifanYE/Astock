@@ -83,7 +83,7 @@ final_mode = st.session_state.lang_mode if st.session_state.lang_mode else "CN"
 
 # [修改] 增加最外层的页面路由拦截
 if st.session_state.current_page == "quant":
-    quant_engine.render_rotation_strategy()  # [新增] 渲染量化页面
+    quant_engine.render_quant_ui()  # [新增] 渲染量化页面
 else:
     # 保持原有逻辑
     if final_mode == "JP":
