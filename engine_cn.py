@@ -387,6 +387,9 @@ def render_cn_ui():
     with monitor_placeholder.container():
         render_mainstream_monitor()
 
+    # 512040 国信价值ETF · BIAS200
+    render_bias200_monitor()
+
     st.markdown("### 📈 A股量化分析工具箱")
     tab1, tab2, tab3, tab4 = st.tabs(["💼 模拟交易", "🔍 基础查询 (特定日期股价)", "📊 策略回测 (波段 vs 长持)", "🏆 排行榜"])
 
@@ -520,6 +523,94 @@ def render_cn_ui():
                 except Exception as e: st.error(f"读取出错: {e}")
             else: st.warning(f"⚠️ 未找到文件 `{target_file}`。")
 
+
+# =============================================================================
+# 512040 国信价值ETF · BIAS200（200日乖离率）—— 按上一交易日收盘计算
+# 说明：把本段两个函数粘到 engine_cn.py（与其它函数同级，比如放在
+#       get_rotation_signal 之后即可）；再在 render_cn_ui() 里、
+#       `st.markdown("### 📈 A股量化分析工具箱")` 之前加一行：
+#           render_bias200_monitor()
+# 依赖：已 import 的 akshare(ak) / pandas(pd) / altair(alt) / streamlit(st)
+# =============================================================================
+def _compute_bias(df, n=200):
+    """df 需含 date, close；返回加了 ma / bias 列、按日期升序的 df。"""
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = df.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+    df["ma"] = df["close"].rolling(n).mean()
+    df["bias"] = (df["close"] - df["ma"]) / df["ma"] * 100
+    return df
+
+
+@st.cache_data(ttl=86400)   # 一天更新一次（BIAS200 按日线，一天变一次即可）
+def get_bias_data(code="512040", n=200):
+    """拉 ETF 日线（前复权），算 BIAS(n)。东财优先、新浪兜底；取不到返回 None。"""
+    df = None
+    try:
+        raw = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
+        if raw is not None and not raw.empty:
+            df = raw.rename(columns={"日期": "date", "收盘": "close"})[["date", "close"]]
+    except Exception as e:
+        print("ETF EM 接口失败:", e)
+    if df is None or df.empty:
+        try:
+            full = f"sh{code}" if code.startswith(("5", "6")) else f"sz{code}"
+            raw = ak.fund_etf_hist_sina(symbol=full)
+            if raw is not None and not raw.empty:
+                df = raw.rename(columns={"date": "date", "close": "close"})[["date", "close"]]
+        except Exception as e:
+            print("ETF Sina 接口失败:", e)
+    if df is None or df.empty:
+        return None
+    return _compute_bias(df, n)
+
+
+def render_bias200_monitor(code="512040", name="国信价值ETF",
+                           n=200, low=-3.0, high=6.0):
+    with st.container(border=True):
+        st.markdown(f"#### 📉 {code} {name} · BIAS{n}（{n}日乖离率）")
+        df = get_bias_data(code, n)
+        valid = df.dropna(subset=["bias"]) if df is not None else None
+        if valid is None or valid.empty:
+            st.warning(f"暂时无法获取 {code} 足够的历史数据来计算 BIAS{n}"
+                       f"（需至少 {n} 个交易日）。请稍后重试或点侧栏同步。")
+            return
+
+        last = valid.iloc[-1]
+        bias, close, ma = float(last["bias"]), float(last["close"]), float(last["ma"])
+        dt = last["date"].date()
+
+        if bias <= low:
+            zone = f"🟢 低估区（收盘低于{n}日均线 {abs(bias):.1f}%）"
+        elif bias >= high:
+            zone = f"🔴 高估区（收盘高于{n}日均线 {bias:.1f}%）"
+        else:
+            zone = "⚪ 正常区间"
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric(f"BIAS{n}（{dt} 收盘）", f"{bias:+.2f}%")
+        c2.metric("收盘价", f"{close:.3f}")
+        c3.metric(f"{n}日均价", f"{ma:.3f}")
+        st.caption(f"{zone}　·　阈值：低估 ≤ {low:g}% / 高估 ≥ {high:g}%"
+                   f"（可按个人策略调整）　·　数据截至 {dt}　·　仅供参考，非投资建议")
+
+        plot = valid.tail(250)
+        line = alt.Chart(plot).mark_line(color="#1E90FF").encode(
+            x=alt.X("date:T", title="日期",
+                    axis=alt.Axis(format="%Y-%m-%d", labelAngle=-45)),
+            y=alt.Y("bias:Q", title=f"BIAS{n} (%)",
+                    scale=alt.Scale(domain=[low, high], clamp=True),
+                    axis=alt.Axis(values=[low, 0, high], format="+.0f")),
+            tooltip=[alt.Tooltip("date:T", title="日期", format="%Y-%m-%d"),
+                     alt.Tooltip("bias:Q", title=f"BIAS{n}", format="+.2f")],
+        )
+        rules = pd.DataFrame({"y": [low, 0.0, high]})
+        rule = alt.Chart(rules).mark_rule(strokeDash=[4, 4], color="#888").encode(y="y:Q")
+        st.altair_chart(
+            (line + rule).properties(
+                height=320, title=f"{name} BIAS{n} 走势（近 250 交易日）").interactive(),
+            use_container_width=True)
 # =============================================================================
 # 5. 模拟交易界面逻辑 (由 Tab 1 调用)
 # =============================================================================
