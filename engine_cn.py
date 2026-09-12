@@ -581,6 +581,26 @@ def render_bias200_monitor(code="512040", name="国信价值ETF",
         bias, close, ma = float(last["bias"]), float(last["close"]), float(last["ma"])
         dt = last["date"].date()
 
+                # ── 操作信号横幅（BIAS200 ≤ low 买入 / ≥ high 卖出）──────────────
+        if bias <= low:
+            st.success(
+                f"**【今日信号：买入】** &nbsp;▶&nbsp; **{name}（{code}）**"
+                f"　　BIAS{n} = **{bias:+.2f}%** ≤ {low:g}%，触及低估买入线",
+                icon="✅",
+            )
+        elif bias >= high:
+            st.error(
+                f"**【今日信号：卖出】** &nbsp;▶&nbsp; **{name}（{code}）**"
+                f"　　BIAS{n} = **{bias:+.2f}%** ≥ {high:g}%，触及高估卖出线",
+                icon="🔴",
+            )
+        else:
+            st.info(
+                f"**【今日信号：持有 / 观望】** &nbsp;▶&nbsp; "
+                f"BIAS{n} = **{bias:+.2f}%**，在 {low:g}% ~ {high:g}% 之间",
+                icon="⏸️",
+            )
+
         if bias <= low:
             zone = f"🟢 低估区（收盘低于{n}日均线 {abs(bias):.1f}%）"
         elif bias >= high:
