@@ -505,6 +505,15 @@ def build_dashboard_html(db_path: str) -> str:
 # Streamlit 页面入口
 # ══════════════════════════════════════════════════════════════════════════
 def render_quant_ui():
+    tab_dash, tab_month = st.tabs(["📊 选股 Dashboard", "📅 月度战记"])
+    with tab_dash:
+        _render_dashboard()
+    with tab_month:
+        import monthly_report
+        monthly_report.render_monthly_ui()
+
+
+def _render_dashboard():
     db = _review_db()
 
     if not os.path.exists(db):
